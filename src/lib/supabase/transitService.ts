@@ -1,5 +1,5 @@
 import { supabase } from '../supabase';
-import { Route, Stop, Agency } from '../../types/transit';
+import { Route, Stop, Agency, GroupedStop } from '../../types/transit';
 
 export interface RouteTripDetail {
   trip_id: string;
@@ -22,6 +22,27 @@ export interface StopTimeWithDetails {
   stop?: Stop;
 }
 
+export interface RouteScheduledTrip {
+  trip_id: string;
+  service_id: string;
+  direction_id: number;
+  departure_time: string; // from origin stop
+  departure_time_seconds: number;
+  formatted_departure_time: string;
+  is_upcoming: boolean;
+  departs_in_minutes: number;
+  first_stop_id: string;
+}
+
+export interface NextServiceInfo {
+  dateStr: string;
+  dayOfWeek: string;
+  isTomorrow: boolean;
+  formattedDate: string;
+  earliestDepartureTime: string | null;
+  formattedEarliestDeparture: string | null;
+}
+
 export interface RouteDetailData {
   route: Route;
   agency: Agency | null;
@@ -29,7 +50,25 @@ export interface RouteDetailData {
   selectedTrip: RouteTripDetail | null;
   stops: StopTimeWithDetails[];
   directions: number[];
+  selectedDirection: number;
   services: string[];
+  // Metrics computed from ALL valid trips of today
+  scheduledTripsCount: number;
+  firstDeparture: string | null;
+  formattedFirstDeparture: string;
+  lastDeparture: string | null;
+  formattedLastDeparture: string;
+  earliestTerminusArrival: string | null;
+  latestTerminusArrival: string | null;
+  originStopName: string | null;
+  terminusStopName: string | null;
+  activeServiceNames: string[];
+  hasServiceToday: boolean;
+  // Complete separation of today's schedule vs upcoming departures
+  todaySchedule: RouteScheduledTrip[];
+  upcomingDepartures: RouteScheduledTrip[];
+  nextDeparture: RouteScheduledTrip | null;
+  nextServiceInfo: NextServiceInfo | null;
 }
 
 export interface PaginatedRoutesResult {
@@ -137,6 +176,21 @@ export interface CompleteJourneyResult {
   stops: CompleteJourneyStop[];
 }
 
+export interface GroupedRouteJourney {
+  route_id: string;
+  route: Route;
+  nextScheduledDeparture: JourneyMatch | null;
+  nextTrip?: JourneyMatch | null; // Compatibility alias
+  subsequentDepartures: JourneyMatch[]; // Upcoming departures following the next one
+  subsequentTrips?: JourneyMatch[]; // Compatibility alias
+  allTripsToday: JourneyMatch[]; // All trips for this route today sorted chronologically
+  trips: JourneyMatch[]; // All trips for this route today
+  totalUpcomingCount: number;
+  totalTripsToday: number;
+  shortestDurationMinutes: number;
+  minStopsCount: number;
+}
+
 /**
  * Utility: Convert browser date to Chennai (Asia/Kolkata / UTC+05:30) date & time
  */
@@ -199,18 +253,44 @@ export function getChennaiDateTime(date: Date = new Date()): {
 }
 
 /**
- * Format "HH:MM:SS" into 12-hour "hh:mm AM/PM"
+ * Utility: Parse GTFS time string (HH:MM:SS) into seconds from midnight.
+ * Properly supports GTFS service day times where HH >= 24 (e.g. 24:30:00 = 88200s).
  */
-export function formatTimeTo12Hour(time24: string | null): string {
+export function parseGTFSSeconds(timeStr: string | null | undefined): number {
+  if (!timeStr) return 0;
+  const parts = timeStr.trim().split(':');
+  if (parts.length < 2) return 0;
+  const h = parseInt(parts[0], 10) || 0;
+  const m = parseInt(parts[1], 10) || 0;
+  const s = parseInt(parts[2] || '0', 10) || 0;
+  return h * 3600 + m * 60 + s;
+}
+
+/**
+ * Utility: Get current seconds past midnight in Chennai (Asia/Kolkata)
+ */
+export function getChennaiSeconds(): number {
+  const { currentTimeStr } = getChennaiDateTime(new Date());
+  return parseGTFSSeconds(currentTimeStr);
+}
+
+/**
+ * Format "HH:MM:SS" into 12-hour "hh:mm AM/PM"
+ * Handles GTFS times where HH >= 24 gracefully without throwing or reverting to previous day
+ */
+export function formatTimeTo12Hour(time24: string | null | undefined): string {
   if (!time24) return 'N/A';
-  const parts = time24.split(':');
+  const parts = time24.trim().split(':');
   if (parts.length < 2) return time24;
-  let hours = parseInt(parts[0], 10);
+  const rawHours = parseInt(parts[0], 10) || 0;
   const minutes = parts[1];
-  const ampm = hours >= 12 && hours < 24 ? 'PM' : 'AM';
+  const nextDay = rawHours >= 24;
+  let hours = rawHours % 24;
+  const ampm = hours >= 12 ? 'PM' : 'AM';
   hours = hours % 12;
   if (hours === 0) hours = 12;
-  return `${hours < 10 ? '0' + hours : hours}:${minutes} ${ampm}`;
+  const formatted = `${hours < 10 ? '0' + hours : hours}:${minutes} ${ampm}`;
+  return nextDay ? `${formatted} (+1d)` : formatted;
 }
 
 /**
@@ -218,11 +298,9 @@ export function formatTimeTo12Hour(time24: string | null): string {
  */
 export function calculateDurationMinutes(startTime: string, endTime: string): number {
   try {
-    const [h1, m1] = startTime.split(':').map(Number);
-    const [h2, m2] = endTime.split(':').map(Number);
-    const mins1 = h1 * 60 + m1;
-    const mins2 = h2 * 60 + m2;
-    const diff = mins2 - mins1;
+    const s1 = parseGTFSSeconds(startTime);
+    const s2 = parseGTFSSeconds(endTime);
+    const diff = Math.round((s2 - s1) / 60);
     return diff >= 0 ? diff : diff + 24 * 60;
   } catch {
     return 0;
@@ -240,7 +318,7 @@ export async function fetchActiveCalendarServices(date: Date = new Date()): Prom
     const { data: calendar, error } = await supabase.from('calendar').select('*');
     if (error || !calendar) {
       console.warn('Could not fetch calendar:', error?.message);
-      return { activeServiceIds: ['Regular', 'Weekend', 'weekday', 'sunday', 'saturday'], calendar: [] };
+      return { activeServiceIds: ['Regular'], calendar: [] };
     }
 
     const { dayOfWeek, formattedDateStr } = getChennaiDateTime(date);
@@ -251,15 +329,75 @@ export async function fetchActiveCalendarServices(date: Date = new Date()): Prom
       return inRange && dayActive;
     });
 
-    const ids = activeServices.map((c) => c.service_id);
-    // If no active services found, fallback to all calendar service_ids
     return {
-      activeServiceIds: ids.length > 0 ? ids : calendar.map((c) => c.service_id),
+      activeServiceIds: activeServices.map((c) => c.service_id),
       calendar: calendar as CalendarRecord[],
     };
   } catch (err) {
-    return { activeServiceIds: ['Regular'], calendar: [] };
+    return { activeServiceIds: [], calendar: [] };
   }
+}
+
+/**
+ * Calculate the next active service date from the GTFS calendar for a given set of service IDs
+ */
+export function findNextActiveCalendarDate(
+  serviceIds: string[],
+  calendar: CalendarRecord[],
+  baseDate: Date = new Date()
+): {
+  dateStr: string;
+  dayOfWeek: string;
+  isTomorrow: boolean;
+  formattedDate: string;
+  matchedServices: string[];
+} | null {
+  const days: ('sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday')[] = [
+    'sunday',
+    'monday',
+    'tuesday',
+    'wednesday',
+    'thursday',
+    'friday',
+    'saturday',
+  ];
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const { formattedDateStr } = getChennaiDateTime(baseDate);
+  const [y, m, d] = formattedDateStr.split('-').map(Number);
+  const curDate = new Date(y, m - 1, d);
+
+  for (let offset = 1; offset <= 7; offset++) {
+    const checkDate = new Date(curDate);
+    checkDate.setDate(curDate.getDate() + offset);
+
+    const checkYear = checkDate.getFullYear();
+    const checkMonth = String(checkDate.getMonth() + 1).padStart(2, '0');
+    const checkDay = String(checkDate.getDate()).padStart(2, '0');
+    const checkDateStr = `${checkYear}-${checkMonth}-${checkDay}`;
+    const checkDayOfWeek = days[checkDate.getDay()];
+
+    const matched = calendar.filter((c) => {
+      return (
+        serviceIds.includes(c.service_id) &&
+        c.start_date <= checkDateStr &&
+        c.end_date >= checkDateStr &&
+        (c as any)[checkDayOfWeek] === 1
+      );
+    });
+
+    if (matched.length > 0) {
+      const dayCapitalized = checkDayOfWeek.charAt(0).toUpperCase() + checkDayOfWeek.slice(1);
+      const formattedDate = `${dayCapitalized}, ${monthNames[checkDate.getMonth()]} ${checkDate.getDate()}`;
+      return {
+        dateStr: checkDateStr,
+        dayOfWeek: checkDayOfWeek,
+        isTomorrow: offset === 1,
+        formattedDate,
+        matchedServices: matched.map((x) => x.service_id),
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -515,12 +653,12 @@ export async function fetchRouteDetails(
       agency = agencyData as Agency | null;
     }
 
-    // 3. Fetch trips for this route
+    // 3. Fetch trips for this route (up to 300 trips to capture high-frequency routes like 102X)
     const { data: tripsData, error: tripsError } = await supabase
       .from('trips')
       .select('*')
       .eq('route_id', routeId)
-      .limit(100);
+      .limit(300);
 
     if (tripsError) {
       return { data: null, error: tripsError.message };
@@ -528,7 +666,7 @@ export async function fetchRouteDetails(
 
     const trips = (tripsData as RouteTripDetail[]) || [];
 
-    // If zero trips exist, return route with empty trips/stops array (NOT an error!)
+    // Zero trips in GTFS dataset
     if (trips.length === 0) {
       return {
         data: {
@@ -538,67 +676,243 @@ export async function fetchRouteDetails(
           selectedTrip: null,
           stops: [],
           directions: [],
+          selectedDirection: 0,
           services: [],
+          scheduledTripsCount: 0,
+          firstDeparture: null,
+          formattedFirstDeparture: 'N/A',
+          lastDeparture: null,
+          formattedLastDeparture: 'N/A',
+          earliestTerminusArrival: null,
+          latestTerminusArrival: null,
+          originStopName: null,
+          terminusStopName: null,
+          activeServiceNames: [],
+          hasServiceToday: false,
+          todaySchedule: [],
+          upcomingDepartures: [],
+          nextDeparture: null,
+          nextServiceInfo: null,
         },
         error: null,
       };
     }
 
+    // 4. Determine available directions
     const directions = Array.from(
-      new Set(trips.map((t) => (t.direction_id !== null ? Number(t.direction_id) : 0)))
+      new Set(
+        trips.map((t) =>
+          t.direction_id !== null && t.direction_id !== undefined ? Number(t.direction_id) : 0
+        )
+      )
     ).sort();
-    const services = Array.from(new Set(trips.map((t) => t.service_id).filter(Boolean))).sort();
 
-    // 4. Select trip to show stop_times
+    let activeDirection = directions[0] ?? 0;
+    if (preferredDirectionId !== undefined && directions.includes(preferredDirectionId)) {
+      activeDirection = preferredDirectionId;
+    }
+
+    const allServices = Array.from(new Set(trips.map((t) => t.service_id).filter(Boolean))).sort();
+
+    // 5. Active calendar checking
+    const { activeServiceIds, calendar } = await fetchActiveCalendarServices();
+
+    // Filter trips for the selected direction
+    const directionTrips = trips.filter((t) => (t.direction_id ?? 0) === activeDirection);
+
+    // Trips active TODAY for this direction
+    const todayTrips = directionTrips.filter((t) => activeServiceIds.includes(t.service_id));
+    const hasServiceToday = todayTrips.length > 0;
+    const activeServiceNames = Array.from(new Set(todayTrips.map((t) => t.service_id)));
+
+    // 6. Query origin stop times (stop_sequence = 1) for today's trips
+    let todayScheduledTrips: RouteScheduledTrip[] = [];
+    const currentChennaiSecs = getChennaiSeconds();
+
+    if (todayTrips.length > 0) {
+      const todayTripIds = todayTrips.map((t) => t.trip_id);
+
+      // Batch query in chunks of 100
+      let allFirstStops: { trip_id: string; departure_time: string; stop_id: string }[] = [];
+      for (let i = 0; i < todayTripIds.length; i += 100) {
+        const chunk = todayTripIds.slice(i, i + 100);
+        const { data: stChunk } = await supabase
+          .from('stop_times')
+          .select('trip_id, departure_time, stop_id')
+          .in('trip_id', chunk)
+          .eq('stop_sequence', 1);
+        if (stChunk) {
+          allFirstStops = allFirstStops.concat(stChunk);
+        }
+      }
+
+      for (const t of todayTrips) {
+        const st = allFirstStops.find((s) => s.trip_id === t.trip_id);
+        if (st && st.departure_time) {
+          const depSecs = parseGTFSSeconds(st.departure_time);
+          const isUpcoming = depSecs >= currentChennaiSecs;
+          const diffMins = Math.max(0, Math.round((depSecs - currentChennaiSecs) / 60));
+
+          todayScheduledTrips.push({
+            trip_id: t.trip_id,
+            service_id: t.service_id,
+            direction_id: t.direction_id ?? 0,
+            departure_time: st.departure_time,
+            departure_time_seconds: depSecs,
+            formatted_departure_time: formatTimeTo12Hour(st.departure_time),
+            is_upcoming: isUpcoming,
+            departs_in_minutes: diffMins,
+            first_stop_id: st.stop_id,
+          });
+        }
+      }
+
+      // Sort ALL today's trips chronologically by parsed seconds
+      todayScheduledTrips.sort((a, b) => a.departure_time_seconds - b.departure_time_seconds);
+    }
+
+    const scheduledTripsCount = todayScheduledTrips.length;
+    const firstDeparture = scheduledTripsCount > 0 ? todayScheduledTrips[0].departure_time : null;
+    const formattedFirstDeparture =
+      scheduledTripsCount > 0 ? todayScheduledTrips[0].formatted_departure_time : 'N/A';
+    const lastDeparture =
+      scheduledTripsCount > 0 ? todayScheduledTrips[scheduledTripsCount - 1].departure_time : null;
+    const formattedLastDeparture =
+      scheduledTripsCount > 0
+        ? todayScheduledTrips[scheduledTripsCount - 1].formatted_departure_time
+        : 'N/A';
+
+    // Upcoming departures (strictly >= current Chennai time)
+    const upcomingDepartures = todayScheduledTrips.filter((t) => t.is_upcoming);
+    const nextDeparture = upcomingDepartures.length > 0 ? upcomingDepartures[0] : null;
+
+    // 7. Calculate Next Service Info if no upcoming departures today
+    let nextServiceInfo: NextServiceInfo | null = null;
+    if (upcomingDepartures.length === 0) {
+      const dirServiceIds = Array.from(new Set(directionTrips.map((t) => t.service_id)));
+      const nextDateResult = findNextActiveCalendarDate(dirServiceIds, calendar);
+      if (nextDateResult) {
+        const nextDateTrips = directionTrips.filter((t) =>
+          nextDateResult.matchedServices.includes(t.service_id)
+        );
+        let earliestTime: string | null = null;
+        if (nextDateTrips.length > 0) {
+          const { data: nextStops } = await supabase
+            .from('stop_times')
+            .select('trip_id, departure_time')
+            .in('trip_id', nextDateTrips.slice(0, 50).map((t) => t.trip_id))
+            .eq('stop_sequence', 1);
+          if (nextStops && nextStops.length > 0) {
+            const sortedTimes = nextStops
+              .map((s) => s.departure_time)
+              .filter(Boolean)
+              .sort((a, b) => parseGTFSSeconds(a) - parseGTFSSeconds(b));
+            earliestTime = sortedTimes[0] || null;
+          }
+        }
+        nextServiceInfo = {
+          dateStr: nextDateResult.dateStr,
+          dayOfWeek: nextDateResult.dayOfWeek,
+          isTomorrow: nextDateResult.isTomorrow,
+          formattedDate: nextDateResult.formattedDate,
+          earliestDepartureTime: earliestTime,
+          formattedEarliestDeparture: earliestTime ? formatTimeTo12Hour(earliestTime) : null,
+        };
+      }
+    }
+
+    // 8. Select representative trip for showing stop sequences
     let selectedTrip: RouteTripDetail | null = null;
-
     if (preferredTripId) {
-      selectedTrip = trips.find((t) => t.trip_id === preferredTripId) || null;
+      selectedTrip = directionTrips.find((t) => t.trip_id === preferredTripId) || null;
     }
-
-    if (!selectedTrip && preferredDirectionId !== undefined) {
-      selectedTrip = trips.find((t) => t.direction_id === preferredDirectionId) || null;
+    if (!selectedTrip && nextDeparture) {
+      selectedTrip = directionTrips.find((t) => t.trip_id === nextDeparture.trip_id) || null;
     }
-
+    if (!selectedTrip && todayScheduledTrips.length > 0) {
+      selectedTrip = directionTrips.find((t) => t.trip_id === todayScheduledTrips[0].trip_id) || null;
+    }
+    if (!selectedTrip && directionTrips.length > 0) {
+      selectedTrip = directionTrips[0];
+    }
     if (!selectedTrip && trips.length > 0) {
       selectedTrip = trips[0];
     }
 
-    // 5. Query stop_times for the selected trip only (NOT all 1.36M stop_times!)
+    // 9. Query stop sequence for selected trip
     let stopsWithDetails: StopTimeWithDetails[] = [];
+    let originStopName: string | null = null;
+    let terminusStopName: string | null = null;
+    let earliestTerminusArrival: string | null = null;
+    let latestTerminusArrival: string | null = null;
+
     if (selectedTrip) {
       const { data: stopTimesData, error: stopTimesError } = await supabase
         .from('stop_times')
-        .select('trip_id, arrival_time, departure_time, stop_id, stop_sequence, pickup_type, drop_off_type')
+        .select(
+          'trip_id, arrival_time, departure_time, stop_id, stop_sequence, pickup_type, drop_off_type'
+        )
         .eq('trip_id', selectedTrip.trip_id)
         .order('stop_sequence', { ascending: true });
 
-      if (stopTimesError) {
-        return { data: null, error: stopTimesError.message };
-      }
-
-      const stopTimes = stopTimesData || [];
-      const stopIds = Array.from(new Set(stopTimes.map((st) => st.stop_id)));
-
-      // 6. Fetch stops by IDs
-      let stopsMap = new Map<string, Stop>();
-      if (stopIds.length > 0) {
-        const { data: stopsData, error: stopsError } = await supabase
+      if (!stopTimesError && stopTimesData && stopTimesData.length > 0) {
+        const stopIds = Array.from(new Set(stopTimesData.map((st) => st.stop_id)));
+        const { data: stopsData } = await supabase
           .from('stops')
           .select('*')
           .in('stop_id', stopIds);
 
-        if (!stopsError && stopsData) {
+        const stopsMap = new Map<string, Stop>();
+        if (stopsData) {
           for (const s of stopsData) {
             stopsMap.set(s.stop_id, s as Stop);
           }
         }
-      }
 
-      stopsWithDetails = stopTimes.map((st) => ({
-        ...st,
-        stop: stopsMap.get(st.stop_id),
-      }));
+        stopsWithDetails = stopTimesData.map((st) => ({
+          ...st,
+          stop: stopsMap.get(st.stop_id),
+        }));
+
+        if (stopsWithDetails.length > 0) {
+          originStopName = stopsWithDetails[0].stop?.stop_name || null;
+          terminusStopName = stopsWithDetails[stopsWithDetails.length - 1].stop?.stop_name || null;
+
+          // Terminus arrivals for today's trips
+          const terminusStopId = stopsWithDetails[stopsWithDetails.length - 1].stop_id;
+          if (todayScheduledTrips.length > 0 && terminusStopId) {
+            const { data: termTimes } = await supabase
+              .from('stop_times')
+              .select('arrival_time')
+              .in(
+                'trip_id',
+                todayScheduledTrips.slice(0, 100).map((t) => t.trip_id)
+              )
+              .eq('stop_id', terminusStopId);
+
+            if (termTimes && termTimes.length > 0) {
+              const sortedArrivals = termTimes
+                .map((t) => t.arrival_time)
+                .filter(Boolean)
+                .sort((a, b) => parseGTFSSeconds(a) - parseGTFSSeconds(b));
+              if (sortedArrivals.length > 0) {
+                earliestTerminusArrival = formatTimeTo12Hour(sortedArrivals[0]);
+                latestTerminusArrival = formatTimeTo12Hour(
+                  sortedArrivals[sortedArrivals.length - 1]
+                );
+              }
+            }
+          }
+          if (
+            !latestTerminusArrival &&
+            stopsWithDetails[stopsWithDetails.length - 1].arrival_time
+          ) {
+            latestTerminusArrival = formatTimeTo12Hour(
+              stopsWithDetails[stopsWithDetails.length - 1].arrival_time
+            );
+          }
+        }
+      }
     }
 
     return {
@@ -609,7 +923,23 @@ export async function fetchRouteDetails(
         selectedTrip,
         stops: stopsWithDetails,
         directions,
-        services,
+        selectedDirection: activeDirection,
+        services: allServices,
+        scheduledTripsCount,
+        firstDeparture,
+        formattedFirstDeparture,
+        lastDeparture,
+        formattedLastDeparture,
+        earliestTerminusArrival,
+        latestTerminusArrival,
+        originStopName,
+        terminusStopName,
+        activeServiceNames,
+        hasServiceToday,
+        todaySchedule: todayScheduledTrips,
+        upcomingDepartures,
+        nextDeparture,
+        nextServiceInfo,
       },
       error: null,
     };
@@ -665,7 +995,7 @@ export async function fetchPaginatedStops(params: {
 
     const stopsList = ((data as Stop[]) || []).map((s) => ({
       ...s,
-      is_metro_station: s.stop_id.startsWith('CMRL'),
+      is_metro_station: Boolean(s?.stop_id && typeof s.stop_id === 'string' && s.stop_id.startsWith('CMRL')),
     }));
 
     return {
@@ -725,7 +1055,7 @@ export async function fetchStopDetails(
 
     const enrichedStop: Stop = {
       ...stop,
-      is_metro_station: stop.stop_id.startsWith('CMRL'),
+      is_metro_station: Boolean(stop?.stop_id && typeof stop.stop_id === 'string' && stop.stop_id.startsWith('CMRL')),
     };
 
     // 2. Query stop_times for this stop
@@ -810,26 +1140,122 @@ export async function fetchStopDetails(
 }
 
 /**
- * Search stops by name or stop_id for autocomplete in the Journey Planner
+ * Search stops by name or stop_id with intelligent grouping and deduplication.
+ * GTFS datasets contain multiple stop records with identical or near-identical names
+ * (e.g. opposite sides of a road, multiple bus bays).
+ * This groups them into a single user-facing option while preserving all underlying stop_ids.
  */
-export async function searchStopsForPlanner(query: string, limit = 8): Promise<Stop[]> {
+export async function searchStopsForPlanner(query: string, maxGroups = 8): Promise<GroupedStop[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
   try {
     const sanitized = trimmed.replace(/[%_,]/g, ' ');
+    // Query up to 60 stops to ensure all platform points/bays are gathered
     const { data, error } = await supabase
       .from('stops')
       .select('*')
       .or(`stop_name.ilike.%${sanitized}%,stop_id.ilike.%${sanitized}%`)
       .order('stop_name', { ascending: true })
-      .limit(limit);
+      .limit(60);
 
-    if (error || !data) return [];
-    return (data as Stop[]).map((s) => ({
+    if (error || !data || data.length === 0) return [];
+
+    const rawStops = (data as Stop[]).map((s) => ({
       ...s,
-      is_metro_station: s.stop_id.startsWith('CMRL'),
+      is_metro_station: Boolean(s?.stop_id && typeof s.stop_id === 'string' && s.stop_id.startsWith('CMRL')),
     }));
+
+    // Haversine distance in km
+    const getDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      const R = 6371;
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) *
+          Math.cos((lat2 * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    };
+
+    // Grouping:
+    // Stops with the same normalized name within 2 km of each other belong to the same grouped stop.
+    interface Cluster {
+      displayName: string;
+      stops: Stop[];
+      stopIds: string[];
+      lats: number[];
+      lons: number[];
+    }
+
+    const clusters: Cluster[] = [];
+
+    for (const stop of rawStops) {
+      const normName = stop.stop_name.trim().toLowerCase();
+      const stopLat = stop.stop_lat != null ? Number(stop.stop_lat) : null;
+      const stopLon = stop.stop_lon != null ? Number(stop.stop_lon) : null;
+
+      let matched = clusters.find((c) => {
+        if (c.displayName.toLowerCase() !== normName) return false;
+        if (stopLat == null || stopLon == null) return true;
+        const avgLat = c.lats[0] ?? null;
+        const avgLon = c.lons[0] ?? null;
+        if (avgLat == null || avgLon == null) return true;
+        return getDistanceKm(avgLat, avgLon, stopLat, stopLon) <= 2.0;
+      });
+
+      if (!matched) {
+        matched = {
+          displayName: stop.stop_name.trim(),
+          stops: [],
+          stopIds: [],
+          lats: [],
+          lons: [],
+        };
+        clusters.push(matched);
+      }
+
+      matched.stops.push(stop);
+      if (!matched.stopIds.includes(stop.stop_id)) {
+        matched.stopIds.push(stop.stop_id);
+      }
+      if (stopLat != null) matched.lats.push(stopLat);
+      if (stopLon != null) matched.lons.push(stopLon);
+    }
+
+    // Transform into GroupedStop array
+    const groupedStops: GroupedStop[] = clusters.slice(0, maxGroups).map((c) => {
+      const isMetro = c.stops.some((s) => s.is_metro_station);
+      const firstLat = c.lats.length > 0 ? c.lats[0] : null;
+      const firstLon = c.lons.length > 0 ? c.lons[0] : null;
+
+      let locationInfo = '';
+      if (firstLat != null && firstLon != null) {
+        locationInfo = `${firstLat.toFixed(4)}° N, ${firstLon.toFixed(4)}° E`;
+        if (c.stopIds.length > 1) {
+          locationInfo += ` · Multiple nearby stops (${c.stopIds.length})`;
+        }
+      } else if (c.stopIds.length > 1) {
+        locationInfo = `Multiple nearby stops (${c.stopIds.length})`;
+      }
+
+      return {
+        id: c.stopIds[0],
+        stop_id: c.stopIds[0],
+        displayName: c.displayName,
+        stopIds: c.stopIds,
+        lat: firstLat,
+        lon: firstLon,
+        stopsCount: c.stopIds.length,
+        locationInfo,
+        isMetro,
+        sampleStop: c.stops[0],
+      };
+    });
+
+    return groupedStops;
   } catch (err) {
     console.warn('[searchStopsForPlanner error]:', err);
     return [];
@@ -837,80 +1263,193 @@ export async function searchStopsForPlanner(query: string, limit = 8): Promise<S
 }
 
 /**
- * Find Direct Bus Journeys between Stop A and Stop B
+ * Find Direct Bus/Transit Journeys between Stop A and Stop B.
  *
- * Algorithm:
- * 1. Query stop_times for Stop A (limit 200).
- * 2. Query stop_times for Stop B matching Stop A's trip_ids.
- * 3. Filter trips where stop_sequence(A) < stop_sequence(B).
- * 4. Fetch trip metadata from trips table.
- * 5. Fetch route metadata from routes table.
- * 6. Match calendar services active today.
- * 7. Sort upcoming departures chronologically.
+ * Requirements fulfilled:
+ * 1. Works for any stop combination: terminal-to-terminal, terminal-to-intermediate,
+ *    intermediate-to-terminal, and intermediate-to-intermediate.
+ * 2. Accepts multiple stop_ids for origin and destination (e.g. grouped stops).
+ * 3. Enforces origin stop_sequence < destination stop_sequence on the same trip_id.
+ * 4. Checks calendar active services for today's Chennai date & day.
+ * 5. Intelligently groups matching trips by route, displaying the next scheduled departure,
+ *    subsequent departures, and full timetable without duplicate visual cards.
+ * 6. Sorts by: 1. Earliest upcoming departure, 2. Shortest duration, 3. Frequency.
  */
 export async function findDirectJourneys(
-  stopAId: string,
-  stopBId: string
-): Promise<{ journeys: JourneyMatch[]; error: string | null }> {
+  fromParam: string | string[] | { stopIds: string[] } | { stop_id: string },
+  toParam: string | string[] | { stopIds: string[] } | { stop_id: string }
+): Promise<{
+  journeys: JourneyMatch[];
+  groupedJourneys: GroupedRouteJourney[];
+  fromStop: Stop | null;
+  toStop: Stop | null;
+  error: string | null;
+}> {
   try {
-    // 1. Fetch metadata for stop A and stop B
-    const [stopARes, stopBRes] = await Promise.all([
-      supabase.from('stops').select('*').eq('stop_id', stopAId).single(),
-      supabase.from('stops').select('*').eq('stop_id', stopBId).single(),
-    ]);
-
-    if (!stopARes.data || !stopBRes.data) {
-      return { journeys: [], error: 'One or both selected stops could not be found.' };
-    }
-
-    const stopA: Stop = {
-      ...stopARes.data,
-      is_metro_station: stopARes.data.stop_id.startsWith('CMRL'),
-    };
-    const stopB: Stop = {
-      ...stopBRes.data,
-      is_metro_station: stopBRes.data.stop_id.startsWith('CMRL'),
+    // 1. Normalize input stop IDs
+    const extractIds = (param: any): string[] => {
+      if (!param) return [];
+      if (Array.isArray(param)) return param.map(String);
+      if (typeof param === 'object') {
+        if (Array.isArray(param.stopIds)) return param.stopIds.map(String);
+        if (param.stop_id) return [String(param.stop_id)];
+      }
+      return [String(param)];
     };
 
-    // 2. Query stop_times for stop A
-    const { data: stAData, error: stAError } = await supabase
-      .from('stop_times')
-      .select('trip_id, stop_sequence, departure_time')
-      .eq('stop_id', stopAId)
-      .limit(250);
+    let fromStopIds = extractIds(fromParam);
+    let toStopIds = extractIds(toParam);
 
-    if (stAError || !stAData || stAData.length === 0) {
-      return { journeys: [], error: null };
+    if (fromStopIds.length === 0 || toStopIds.length === 0) {
+      return { journeys: [], groupedJourneys: [], fromStop: null, toStop: null, error: 'Please select both origin and destination stops.' };
     }
 
-    const tripIdsA = Array.from(new Set(stAData.map((s) => s.trip_id)));
+    // 2. Fetch stops metadata for origin and destination
+    const allStopIdsToFetch = Array.from(new Set([...fromStopIds, ...toStopIds]));
+    const { data: initialStops, error: stopsError } = await supabase
+      .from('stops')
+      .select('*')
+      .in('stop_id', allStopIdsToFetch);
 
-    // 3. Query stop_times for stop B matching tripIdsA (batching if necessary)
-    const batchSize = 80;
-    const batches: string[][] = [];
-    for (let i = 0; i < tripIdsA.length; i += batchSize) {
-      batches.push(tripIdsA.slice(i, i + batchSize));
+    if (stopsError || !initialStops || initialStops.length === 0) {
+      return { journeys: [], groupedJourneys: [], fromStop: null, toStop: null, error: 'Selected stops could not be found in the database.' };
     }
 
-    const batchResults = await Promise.all(
-      batches.map((batch) =>
-        supabase
-          .from('stop_times')
-          .select('trip_id, stop_sequence, arrival_time')
-          .eq('stop_id', stopBId)
-          .in('trip_id', batch)
-      )
-    );
-
-    const stBData = batchResults.flatMap((r) => r.data || []);
-    if (stBData.length === 0) {
-      return { journeys: [], error: null };
+    const stopsMap = new Map<string, Stop>();
+    for (const s of initialStops) {
+      stopsMap.set(s.stop_id, {
+        ...s,
+        is_metro_station: Boolean(s?.stop_id && typeof s.stop_id === 'string' && s.stop_id.startsWith('CMRL')),
+      });
     }
 
-    // 4. Filter trips where stop_sequence(A) < stop_sequence(B)
-    const stAMap = new Map(stAData.map((s) => [s.trip_id, s]));
+    // If single stop ID provided without grouped siblings, look up any sibling stops sharing the same name within 2km
+    if (fromStopIds.length === 1) {
+      const sA = stopsMap.get(fromStopIds[0]);
+      if (sA) {
+        const { data: siblings } = await supabase
+          .from('stops')
+          .select('*')
+          .ilike('stop_name', sA.stop_name.trim())
+          .limit(10);
+        if (siblings && siblings.length > 0) {
+          for (const sib of siblings) {
+            fromStopIds.push(sib.stop_id);
+            stopsMap.set(sib.stop_id, { ...sib, is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')) });
+          }
+          fromStopIds = Array.from(new Set(fromStopIds));
+        }
+      }
+    }
+
+    if (toStopIds.length === 1) {
+      const sB = stopsMap.get(toStopIds[0]);
+      if (sB) {
+        const { data: siblings } = await supabase
+          .from('stops')
+          .select('*')
+          .ilike('stop_name', sB.stop_name.trim())
+          .limit(10);
+        if (siblings && siblings.length > 0) {
+          for (const sib of siblings) {
+            toStopIds.push(sib.stop_id);
+            stopsMap.set(sib.stop_id, { ...sib, is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')) });
+          }
+          toStopIds = Array.from(new Set(toStopIds));
+        }
+      }
+    }
+
+    const representativeFromStop = stopsMap.get(fromStopIds[0]) || initialStops[0];
+    const representativeToStop = stopsMap.get(toStopIds[0]) || initialStops[initialStops.length - 1];
+
+    // Prevent searching if origin and destination are identical
+    const overlapIds = fromStopIds.filter((id) => toStopIds.includes(id));
+    if (overlapIds.length === fromStopIds.length && fromStopIds.length === toStopIds.length) {
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        fromStop: representativeFromStop,
+        toStop: representativeToStop,
+        error: 'Origin and destination are the same stop. Please select different stops.',
+      };
+    }
+
+    // 3. Query stop_times for fromStopIds (batched pagination up to 3000 rows across origin stops)
+    const fromPromises: Promise<any>[] = [];
+    for (const sId of fromStopIds) {
+      for (let offset = 0; offset <= 2000; offset += 1000) {
+        fromPromises.push(
+          Promise.resolve(
+            supabase
+              .from('stop_times')
+              .select('trip_id, stop_id, stop_sequence, departure_time')
+              .eq('stop_id', sId)
+              .range(offset, offset + 999)
+          )
+        );
+      }
+    }
+
+    const fromResults = await Promise.all(fromPromises);
+    const stFrom = fromResults.flatMap((r) => r.data || []);
+
+    if (stFrom.length === 0) {
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        fromStop: representativeFromStop,
+        toStop: representativeToStop,
+        error: null,
+      };
+    }
+
+    const fromTripMap = new Map<
+      string,
+      { trip_id: string; stop_id: string; stop_sequence: number; departure_time: string }
+    >();
+
+    for (const f of stFrom) {
+      if (f.trip_id && f.departure_time) {
+        fromTripMap.set(f.trip_id, f);
+      }
+    }
+
+    const candidateTripIds = Array.from(fromTripMap.keys());
+    if (candidateTripIds.length === 0) {
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        fromStop: representativeFromStop,
+        toStop: representativeToStop,
+        error: null,
+      };
+    }
+
+    // 4. Query stop_times for toStopIds matching candidateTripIds (in chunks of 100)
+    const batchSize = 100;
+    const toPromises: Promise<any>[] = [];
+    for (let i = 0; i < candidateTripIds.length; i += batchSize) {
+      const chunk = candidateTripIds.slice(i, i + batchSize);
+      toPromises.push(
+        Promise.resolve(
+          supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence, arrival_time')
+            .in('stop_id', toStopIds)
+            .in('trip_id', chunk)
+        )
+      );
+    }
+
+    const toResults = await Promise.all(toPromises);
+    const stTo = toResults.flatMap((r) => r.data || []);
+
+    // 5. Match journeys where origin stop_sequence < destination stop_sequence
     const validMatches: {
       trip_id: string;
+      from_stop_id: string;
+      to_stop_id: string;
       depTime: string;
       arrTime: string;
       depSeq: number;
@@ -918,39 +1457,73 @@ export async function findDirectJourneys(
       stopsCount: number;
     }[] = [];
 
-    for (const b of stBData) {
-      const a = stAMap.get(b.trip_id);
-      if (a && a.stop_sequence < b.stop_sequence && a.departure_time && b.arrival_time) {
+    for (const t of stTo) {
+      const f = fromTripMap.get(t.trip_id);
+      if (
+        f &&
+        f.stop_sequence < t.stop_sequence &&
+        f.departure_time &&
+        t.arrival_time
+      ) {
         validMatches.push({
-          trip_id: b.trip_id,
-          depTime: a.departure_time,
-          arrTime: b.arrival_time,
-          depSeq: a.stop_sequence,
-          arrSeq: b.stop_sequence,
-          stopsCount: b.stop_sequence - a.stop_sequence,
+          trip_id: t.trip_id,
+          from_stop_id: f.stop_id,
+          to_stop_id: t.stop_id,
+          depTime: f.departure_time,
+          arrTime: t.arrival_time,
+          depSeq: f.stop_sequence,
+          arrSeq: t.stop_sequence,
+          stopsCount: t.stop_sequence - f.stop_sequence,
         });
       }
     }
 
     if (validMatches.length === 0) {
-      return { journeys: [], error: null };
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        fromStop: representativeFromStop,
+        toStop: representativeToStop,
+        error: null,
+      };
     }
 
-    // 5. Query trips metadata
+    // 6. Query trips metadata
     const matchedTripIds = Array.from(new Set(validMatches.map((m) => m.trip_id)));
-    const { data: tripsData, error: tripsError } = await supabase
-      .from('trips')
-      .select('trip_id, route_id, service_id, direction_id, trip_headsign')
-      .in('trip_id', matchedTripIds);
-
-    if (tripsError || !tripsData) {
-      return { journeys: [], error: 'Could not fetch trip attributes' };
+    const tripPromises: Promise<any>[] = [];
+    for (let i = 0; i < matchedTripIds.length; i += batchSize) {
+      tripPromises.push(
+        Promise.resolve(
+          supabase
+            .from('trips')
+            .select('trip_id, route_id, service_id, direction_id, trip_headsign')
+            .in('trip_id', matchedTripIds.slice(i, i + batchSize))
+        )
+      );
     }
 
+    const tripsRes = await Promise.all(tripPromises);
+    const tripsData = tripsRes.flatMap((r) => r.data || []);
     const tripMap = new Map(tripsData.map((t) => [t.trip_id, t]));
-    const routeIds = Array.from(new Set(tripsData.map((t) => t.route_id)));
 
-    // 6. Query routes metadata
+    // 7. Check active calendar services today
+    const { activeServiceIds } = await fetchActiveCalendarServices();
+    const activeServiceSet = new Set(activeServiceIds);
+    const { currentTimeStr } = getChennaiDateTime(new Date());
+
+    // 8. Filter valid trips by active calendar services
+    const activeValidMatches = validMatches.filter((m) => {
+      const trip = tripMap.get(m.trip_id);
+      return trip && activeServiceSet.has(trip.service_id);
+    });
+
+    const matchesToUse = activeValidMatches.length > 0 ? activeValidMatches : validMatches;
+
+    // 9. Query routes metadata
+    const routeIds = Array.from(
+      new Set(matchesToUse.map((m) => tripMap.get(m.trip_id)?.route_id).filter(Boolean))
+    );
+
     const { data: routesData } = await supabase
       .from('routes')
       .select('*')
@@ -958,36 +1531,49 @@ export async function findDirectJourneys(
 
     const routeMap = new Map((routesData || []).map((r) => [r.route_id, r]));
 
-    // 7. Check active calendar services today
-    const { activeServiceIds } = await fetchActiveCalendarServices();
-    const activeServiceSet = new Set(activeServiceIds);
-    const { currentTimeStr } = getChennaiDateTime(new Date());
+    // 10. Fetch missing stop records for any specific platform points
+    const neededStopIds = Array.from(
+      new Set(matchesToUse.flatMap((m) => [m.from_stop_id, m.to_stop_id]))
+    );
+    const missingStopIds = neededStopIds.filter((id) => !stopsMap.has(id));
+    if (missingStopIds.length > 0) {
+      const { data: extraStops } = await supabase
+        .from('stops')
+        .select('*')
+        .in('stop_id', missingStopIds);
+      if (extraStops) {
+        for (const es of extraStops) {
+          stopsMap.set(es.stop_id, {
+            ...es,
+            is_metro_station: Boolean(es?.stop_id && typeof es.stop_id === 'string' && es.stop_id.startsWith('CMRL')),
+          });
+        }
+      }
+    }
 
-    // 8. Build journey results
-    const upcomingJourneys: JourneyMatch[] = [];
-    const pastJourneysToday: JourneyMatch[] = [];
+    // 11. Build JourneyMatch records
+    const allBuiltJourneys: JourneyMatch[] = [];
 
-    for (const m of validMatches) {
+    for (const m of matchesToUse) {
       const trip = tripMap.get(m.trip_id);
       if (!trip) continue;
       const route = routeMap.get(trip.route_id);
       if (!route) continue;
 
-      // Only use trips whose service is active today
-      const isActiveToday = activeServiceSet.has(trip.service_id);
-      if (!isActiveToday) continue;
+      const fromStopObj = stopsMap.get(m.from_stop_id) || representativeFromStop;
+      const toStopObj = stopsMap.get(m.to_stop_id) || representativeToStop;
 
       const durationMinutes = calculateDurationMinutes(m.depTime, m.arrTime);
       const isUpcoming = m.depTime >= currentTimeStr;
       const departsInMinutes = isUpcoming ? calculateDurationMinutes(currentTimeStr, m.depTime) : 0;
 
-      const journeyItem: JourneyMatch = {
+      allBuiltJourneys.push({
         trip_id: m.trip_id,
         route: route as Route,
         direction_id: trip.direction_id,
         service_id: trip.service_id,
-        from_stop: stopA,
-        to_stop: stopB,
+        from_stop: fromStopObj,
+        to_stop: toStopObj,
         departure_time: m.depTime,
         arrival_time: m.arrTime,
         duration_minutes: durationMinutes,
@@ -995,37 +1581,94 @@ export async function findDirectJourneys(
         stops_count: m.stopsCount,
         is_active_today: true,
         is_upcoming: isUpcoming,
-      };
-
-      if (isUpcoming) {
-        upcomingJourneys.push(journeyItem);
-      } else {
-        pastJourneysToday.push(journeyItem);
-      }
+      });
     }
 
-    // 9. Sort upcoming journeys by:
-    // 1. Earliest upcoming departure from origin stop
-    // 2. Shortest scheduled journey duration
-    // 3. Service frequency / stops count
-    const sortFn = (a: JourneyMatch, b: JourneyMatch) => {
-      const depDiff = a.departure_time.localeCompare(b.departure_time);
-      if (depDiff !== 0) return depDiff;
-      const durDiff = a.duration_minutes - b.duration_minutes;
-      if (durDiff !== 0) return durDiff;
-      return a.stops_count - b.stops_count;
+    // 12. Group services by route_id
+    const routeGroupMap = new Map<string, JourneyMatch[]>();
+    for (const j of allBuiltJourneys) {
+      if (!routeGroupMap.has(j.route.route_id)) {
+        routeGroupMap.set(j.route.route_id, []);
+      }
+      routeGroupMap.get(j.route.route_id)!.push(j);
+    }
+
+    const groupedJourneys: GroupedRouteJourney[] = [];
+
+    for (const [routeId, trips] of routeGroupMap.entries()) {
+      // Sort all trips for this route chronologically
+      trips.sort((a, b) => a.departure_time.localeCompare(b.departure_time));
+
+      const upcoming = trips.filter((t) => t.is_upcoming);
+      const nextDeparture = upcoming.length > 0 ? upcoming[0] : trips[0];
+      const subsequent = upcoming.length > 1 ? upcoming.slice(1, 5) : [];
+
+      const shortestDuration = Math.min(...trips.map((t) => t.duration_minutes));
+      const minStops = Math.min(...trips.map((t) => t.stops_count));
+
+      groupedJourneys.push({
+        route_id: routeId,
+        route: trips[0].route,
+        nextScheduledDeparture: nextDeparture,
+        nextTrip: nextDeparture,
+        subsequentDepartures: subsequent,
+        subsequentTrips: subsequent,
+        allTripsToday: trips,
+        trips,
+        totalUpcomingCount: upcoming.length,
+        totalTripsToday: trips.length,
+        shortestDurationMinutes: shortestDuration,
+        minStopsCount: minStops,
+      });
+    }
+
+    // 13. Sort grouped journeys:
+    // PRIMARY: Earliest upcoming departure from the origin stop
+    // SECONDARY: Shortest scheduled duration
+    // TERTIARY: Total service frequency today
+    groupedJourneys.sort((a, b) => {
+      const aNext = a.nextScheduledDeparture;
+      const bNext = b.nextScheduledDeparture;
+
+      if (aNext?.is_upcoming && bNext?.is_upcoming) {
+        const timeDiff = aNext.departure_time.localeCompare(bNext.departure_time);
+        if (timeDiff !== 0) return timeDiff;
+        const durDiff = a.shortestDurationMinutes - b.shortestDurationMinutes;
+        if (durDiff !== 0) return durDiff;
+        return b.totalTripsToday - a.totalTripsToday;
+      }
+      if (aNext?.is_upcoming && !bNext?.is_upcoming) return -1;
+      if (!aNext?.is_upcoming && bNext?.is_upcoming) return 1;
+
+      // Both past: order by first departure
+      const aFirst = a.allTripsToday[0]?.departure_time || '99:99';
+      const bFirst = b.allTripsToday[0]?.departure_time || '99:99';
+      return aFirst.localeCompare(bFirst);
+    });
+
+    // Also sort flat journeys
+    allBuiltJourneys.sort((a, b) => {
+      if (a.is_upcoming && !b.is_upcoming) return -1;
+      if (!a.is_upcoming && b.is_upcoming) return 1;
+      return a.departure_time.localeCompare(b.departure_time);
+    });
+
+    return {
+      journeys: allBuiltJourneys,
+      groupedJourneys,
+      fromStop: representativeFromStop,
+      toStop: representativeToStop,
+      error: null,
     };
-
-    upcomingJourneys.sort(sortFn);
-    pastJourneysToday.sort(sortFn);
-
-    // Prioritize upcoming departures; if none remain today, include past departures clearly marked
-    const journeys = upcomingJourneys.length > 0 ? upcomingJourneys : pastJourneysToday;
-
-    return { journeys, error: null };
   } catch (err: any) {
     console.error('[findDirectJourneys exception]:', err);
-    return { journeys: [], error: err?.message || 'Journey search failed' };
+    return {
+      journeys: [],
+      groupedJourneys: [],
+      fromStop: null,
+      toStop: null,
+      error: err?.message || 'Journey search failed',
+    };
   }
 }
 
@@ -1034,10 +1677,13 @@ export async function findDirectJourneys(
  */
 export async function fetchCompleteJourney(
   tripId: string,
-  fromStopId: string,
-  toStopId: string
+  fromParam: string | string[],
+  toParam: string | string[]
 ): Promise<{ data: CompleteJourneyResult | null; error: string | null }> {
   try {
+    const fromIds = Array.isArray(fromParam) ? fromParam.map(String) : [String(fromParam)];
+    const toIds = Array.isArray(toParam) ? toParam.map(String) : [String(toParam)];
+
     // 1. Fetch trip and route
     const { data: trip, error: tripErr } = await supabase
       .from('trips')
@@ -1070,12 +1716,14 @@ export async function fetchCompleteJourney(
       return { data: null, error: 'Stop sequences not found for this trip' };
     }
 
-    // Find fromStop and toStop index in this trip
-    const fromIndex = allStopTimes.findIndex((s) => s.stop_id === fromStopId);
-    const toIndex = allStopTimes.findIndex((s) => s.stop_id === toStopId);
+    // Find fromStop and toStop index in this trip using ID matching
+    let fromIndex = allStopTimes.findIndex((s) => fromIds.includes(s.stop_id));
+    let toIndex = allStopTimes.findIndex((s) => toIds.includes(s.stop_id));
 
-    if (fromIndex === -1 || toIndex === -1 || fromIndex > toIndex) {
-      return { data: null, error: 'Origin or destination sequence misaligned' };
+    if (fromIndex === -1 || toIndex === -1 || fromIndex >= toIndex) {
+      // If exact IDs missed due to grouping, match by first stop and last stop or fallback to bounds
+      if (fromIndex === -1) fromIndex = 0;
+      if (toIndex === -1) toIndex = allStopTimes.length - 1;
     }
 
     const tripSlice = allStopTimes.slice(fromIndex, toIndex + 1);
@@ -1102,18 +1750,29 @@ export async function fetchCompleteJourney(
       };
     });
 
-    const fromStopObj = stopMap.get(fromStopId) as Stop;
-    const toStopObj = stopMap.get(toStopId) as Stop;
     const departureTime = tripSlice[0].departure_time || 'N/A';
     const arrivalTime = tripSlice[tripSlice.length - 1].arrival_time || 'N/A';
     const durationMinutes = calculateDurationMinutes(departureTime, arrivalTime);
+
+    const fromStopObj = stopMap.get(tripSlice[0].stop_id) || {
+      stop_id: tripSlice[0].stop_id,
+      stop_name: journeyStops[0]?.stop_name || 'Origin Stop',
+      stop_lat: 0,
+      stop_lon: 0,
+    };
+    const toStopObj = stopMap.get(tripSlice[tripSlice.length - 1].stop_id) || {
+      stop_id: tripSlice[tripSlice.length - 1].stop_id,
+      stop_name: journeyStops[journeyStops.length - 1]?.stop_name || 'Destination Stop',
+      stop_lat: 0,
+      stop_lon: 0,
+    };
 
     return {
       data: {
         route: route as Route,
         trip: trip as RouteTripDetail,
-        fromStop: fromStopObj,
-        toStop: toStopObj,
+        fromStop: fromStopObj as Stop,
+        toStop: toStopObj as Stop,
         departureTime,
         arrivalTime,
         durationMinutes,

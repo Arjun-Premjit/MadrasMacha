@@ -85,8 +85,8 @@ export const MtcPage: React.FC<MtcPageProps> = ({ onSelectRoute }) => {
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-black pt-28 pb-20 px-6 sm:px-12 max-w-7xl mx-auto font-sans selection:bg-black selection:text-white">
-      {/* Header */}
-      <div className="pb-8 border-b border-black/10">
+      {/* Header (No dividing line) */}
+      <div className="pb-4">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-black/5 text-xs font-semibold uppercase tracking-wider text-black/70 mb-4">
           <Bus className="w-3.5 h-3.5 text-black" />
           <span>Metropolitan Transport Corporation · Chennai</span>
@@ -94,47 +94,37 @@ export const MtcPage: React.FC<MtcPageProps> = ({ onSelectRoute }) => {
         <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight text-black">
           MTC Bus Network
         </h1>
-        <p className="mt-3 text-base sm:text-lg text-black/75 max-w-2xl leading-relaxed">
-          Metropolitan Transport Corporation connects the Greater Chennai metropolitan area with over four thousand scheduled bus corridors, providing affordable public mobility from North Chennai to the IT corridors and coastal highways.
+        <p className="mt-4 text-base sm:text-lg text-black/75 max-w-3xl leading-relaxed">
+          Metropolitan Transport Corporation connects the Greater Chennai metropolitan area with over four thousand scheduled bus corridors, providing affordable public mobility from North Chennai to the IT corridors and coastal highways as the backbone of Chennai public transit, operating low-floor, deluxe, and express services with integrated electronic ticketing across all city terminals and bus stops.
         </p>
       </div>
 
-      {/* Static Bus Visual Feature (No Animations, No Watermark) */}
-      <div className="py-8 my-4 flex flex-col lg:flex-row items-center justify-between gap-10 bg-white rounded-3xl border border-black/10 p-6 sm:p-10 shadow-xs">
-        <div className="w-full lg:w-1/2 max-w-lg">
-          <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 block">
-            Official Fleet Vehicle
-          </span>
-          <h2 className="text-3xl sm:text-4xl font-black text-black mt-1">
-            MTC Transit Bus
-          </h2>
-          <p className="mt-4 text-sm sm:text-base text-black/70 leading-relaxed">
-            The backbone of Chennai public transit, operating low-floor, deluxe, and express services with integrated electronic ticketing across all city terminals and bus stops.
-          </p>
-
-          <div className="mt-6 grid grid-cols-2 gap-4 text-xs">
-            <div className="p-3.5 rounded-2xl bg-neutral-50 border border-black/5">
-              <span className="font-bold text-neutral-500 uppercase tracking-wider block text-[10px]">
-                Headquarters
-              </span>
-              <span className="font-semibold text-neutral-900 mt-1 block">
-                Pallavan House, Anna Salai
-              </span>
-            </div>
-            <div className="p-3.5 rounded-2xl bg-neutral-50 border border-black/5">
-              <span className="font-bold text-neutral-500 uppercase tracking-wider block text-[10px]">
-                Transit Helpline
-              </span>
-              <a href="tel:04423455801" className="font-semibold text-neutral-900 mt-1 block hover:underline">
-                044-23455801
-              </a>
-            </div>
+      {/* Bus Visual Feature: Headquarters & Helpline on the left, Animated Bus on the right */}
+      <div className="py-6 my-2 flex flex-col lg:flex-row items-center justify-between gap-10">
+        <div className="w-full lg:w-1/2 max-w-lg space-y-4">
+          <div className="p-5 rounded-2xl bg-neutral-100/70 border border-black/5">
+            <span className="font-bold text-neutral-500 uppercase tracking-wider block text-xs">
+              Headquarters
+            </span>
+            <span className="font-semibold text-neutral-900 mt-1.5 block text-base sm:text-lg leading-relaxed">
+              Pallavan House, Anna Salai
+            </span>
+          </div>
+          <div className="p-5 rounded-2xl bg-neutral-100/70 border border-black/5">
+            <span className="font-bold text-neutral-500 uppercase tracking-wider block text-xs">
+              Transit Helpline
+            </span>
+            <a
+              href="tel:04423455801"
+              className="font-semibold text-neutral-900 mt-1.5 block text-base sm:text-lg leading-relaxed hover:underline"
+            >
+              044-23455801
+            </a>
           </div>
         </div>
 
         <div className="w-full lg:w-1/2 flex justify-center">
-          {/* Kept STATIC with no animations and no watermark */}
-          <MtcBus3D isStatic={true} showWatermark={false} className="w-full max-w-lg mx-auto" />
+          <MtcBus3D isStatic={false} showWatermark={false} className="w-full max-w-lg mx-auto" />
         </div>
       </div>
 

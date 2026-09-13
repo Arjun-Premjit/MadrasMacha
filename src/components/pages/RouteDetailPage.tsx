@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   fetchRouteDetails,
-  fetchNextDeparturesForRoute,
   RouteDetailData,
-  NextDepartureInfo,
   formatTimeTo12Hour,
+  parseGTFSSeconds,
 } from '../../lib/supabase/transitService';
+import { useChennaiTime } from '../../hooks/useChennaiTime';
 import {
   ArrowLeft,
   Bus,
@@ -17,6 +17,9 @@ import {
   RefreshCw,
   ChevronRight,
   Sparkles,
+  Calendar,
+  CheckCircle2,
+  CalendarOff,
 } from 'lucide-react';
 
 interface RouteDetailPageProps {
@@ -38,9 +41,12 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
   const [selectedTripId, setSelectedTripId] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Next scheduled bus state
-  const [nextDeparture, setNextDeparture] = useState<NextDepartureInfo | null>(null);
-  const [loadingNextDep, setLoadingNextDep] = useState<boolean>(false);
+  // Dynamic live Chennai clock (Asia/Kolkata UTC+05:30)
+  const chennaiTime = useChennaiTime();
+  const currentChennaiSecs = useMemo(
+    () => parseGTFSSeconds(chennaiTime.currentTimeStr),
+    [chennaiTime.currentTimeStr]
+  );
 
   const loadRoute = async (tripId?: string, dir?: number) => {
     setLoading(true);
@@ -53,7 +59,9 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
         setData(res.data);
         if (res.data.selectedTrip) {
           setSelectedTripId(res.data.selectedTrip.trip_id);
-          setSelectedDirection(res.data.selectedTrip.direction_id ?? 0);
+        }
+        if (res.data.selectedDirection !== undefined) {
+          setSelectedDirection(res.data.selectedDirection);
         }
       }
     } catch (err: any) {
@@ -63,33 +71,15 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
     }
   };
 
-  const loadNextDeparture = async (dir?: number) => {
-    setLoadingNextDep(true);
-    try {
-      const nextInfo = await fetchNextDeparturesForRoute(routeId, dir);
-      setNextDeparture(nextInfo);
-    } catch (err) {
-      console.warn('Failed to calculate next departure:', err);
-    } finally {
-      setLoadingNextDep(false);
-    }
-  };
-
   useEffect(() => {
     if (routeId) {
       loadRoute();
-      loadNextDeparture();
     }
   }, [routeId]);
 
   const handleDirectionChange = (directionId: number) => {
     setSelectedDirection(directionId);
-    if (!data) return;
-    const matchingTrip = data.trips.find((t) => (t.direction_id ?? 0) === directionId);
-    if (matchingTrip) {
-      loadRoute(matchingTrip.trip_id, directionId);
-    }
-    loadNextDeparture(directionId);
+    loadRoute(undefined, directionId);
   };
 
   const handleTripChange = (tripId: string) => {
@@ -157,19 +147,44 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
     );
   }
 
-  const { route, agency, trips, selectedTrip, stops, directions } = data;
+  const {
+    route,
+    agency,
+    trips,
+    selectedTrip,
+    stops,
+    directions,
+    scheduledTripsCount,
+    formattedFirstDeparture,
+    formattedLastDeparture,
+    latestTerminusArrival,
+    originStopName,
+    terminusStopName,
+    activeServiceNames,
+    hasServiceToday,
+    todaySchedule,
+    nextServiceInfo,
+  } = data;
+
   const isMetro = route.route_type === 1 || route.agency_id === 'CMRL';
   const hasTrips = trips.length > 0;
 
-  // Extract terminus names if stops exist
-  const firstStop = stops.length > 0 ? stops[0]?.stop?.stop_name || 'Origin' : 'N/A';
-  const lastStop = stops.length > 0 ? stops[stops.length - 1]?.stop?.stop_name || 'Terminus' : 'N/A';
+  // Dynamic filter for upcoming departures based on current live clock
+  const dynamicUpcomingDepartures = todaySchedule.filter(
+    (t) => t.departure_time_seconds >= currentChennaiSecs
+  );
+  const nextDepartureTrip =
+    dynamicUpcomingDepartures.length > 0 ? dynamicUpcomingDepartures[0] : null;
 
-  const firstDep = stops.length > 0 && stops[0]?.departure_time ? formatTimeTo12Hour(stops[0].departure_time) : 'N/A';
-  const lastArr =
-    stops.length > 0 && stops[stops.length - 1]?.arrival_time
-      ? formatTimeTo12Hour(stops[stops.length - 1].arrival_time)
-      : 'N/A';
+  const nextDepartureMinutes = nextDepartureTrip
+    ? Math.max(0, Math.round((nextDepartureTrip.departure_time_seconds - currentChennaiSecs) / 60))
+    : null;
+
+  // Corridor origin and terminus names
+  const corridorOrigin = originStopName || (stops.length > 0 ? stops[0]?.stop?.stop_name : 'Origin');
+  const corridorTerminus =
+    terminusStopName ||
+    (stops.length > 0 ? stops[stops.length - 1]?.stop?.stop_name : 'Terminus');
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-black pt-28 pb-24 px-6 sm:px-12 max-w-5xl mx-auto font-sans selection:bg-black selection:text-white">
@@ -235,70 +250,44 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
               Corridor Span
             </div>
             <div className="text-sm font-bold text-neutral-800">
-              {firstStop !== 'N/A' ? `${firstStop} ↔ ${lastStop}` : 'N/A'}
+              {corridorOrigin && corridorTerminus ? `${corridorOrigin} → ${corridorTerminus}` : 'N/A'}
             </div>
             <div className="text-xs text-neutral-500 font-medium">
-              {hasTrips ? `${trips.length} scheduled trips` : '0 scheduled trips'}
+              {hasTrips ? `${trips.length} GTFS trips (${scheduledTripsCount} scheduled today)` : '0 scheduled trips'}
             </div>
           </div>
         </div>
 
-        {/* Direction & Trip Selectors (only if trips exist) */}
-        {hasTrips && (
+        {/* Direction Selector */}
+        {hasTrips && directions.length > 1 && (
           <div className="pt-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            {/* Direction Tabs */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 mr-1">
                 Direction:
               </span>
-              {directions.length > 0 ? (
-                directions.map((dir) => (
-                  <button
-                    key={dir}
-                    onClick={() => handleDirectionChange(dir)}
-                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-                      selectedDirection === dir
-                        ? 'bg-black text-white shadow-sm'
-                        : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-                    }`}
-                  >
-                    {dir === 0 ? 'Direction 0 (Outbound)' : 'Direction 1 (Inbound)'}
-                  </button>
-                ))
-              ) : (
-                <span className="text-xs font-medium text-neutral-600 bg-neutral-100 px-3 py-1 rounded-full">
-                  Direction 0
-                </span>
-              )}
+              {directions.map((dir) => (
+                <button
+                  key={dir}
+                  onClick={() => handleDirectionChange(dir)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                    selectedDirection === dir
+                      ? 'bg-black text-white shadow-sm'
+                      : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
+                  }`}
+                >
+                  {dir === 0 ? 'Direction 0 (Outbound)' : 'Direction 1 (Inbound)'}
+                </button>
+              ))}
             </div>
 
-            {/* Trip Selector */}
-            {trips.length > 1 && (
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 shrink-0">
-                  Trip:
-                </span>
-                <select
-                  value={selectedTripId}
-                  onChange={(e) => handleTripChange(e.target.value)}
-                  className="w-full sm:w-auto bg-neutral-100 border border-neutral-200 text-neutral-800 text-xs font-semibold rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-black/20 cursor-pointer"
-                >
-                  {trips
-                    .filter((t) => (t.direction_id ?? 0) === selectedDirection)
-                    .slice(0, 40)
-                    .map((t, idx) => (
-                      <option key={t.trip_id} value={t.trip_id}>
-                        Trip #{idx + 1} ({t.service_id || 'Regular'}) - {t.trip_id}
-                      </option>
-                    ))}
-                </select>
-              </div>
-            )}
+            <div className="text-xs text-neutral-500 font-medium">
+              Showing active timetable for Direction {selectedDirection}
+            </div>
           </div>
         )}
 
         {/* Operational Metrics Bar */}
-        <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-3 bg-neutral-50 rounded-2xl p-4 border border-neutral-100">
+        <div className="mt-6 grid grid-cols-2 sm:grid-cols-5 gap-3 bg-neutral-50 rounded-2xl p-4 border border-neutral-100">
           <div>
             <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block">
               Total Stops
@@ -310,19 +299,28 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
 
           <div>
             <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block">
-              First Departure
+              Trips Today
             </span>
             <span className="text-base sm:text-lg font-black text-neutral-900 mt-0.5 block">
-              {firstDep}
+              {scheduledTripsCount > 0 ? `${scheduledTripsCount} Trips` : '0 Trips'}
             </span>
           </div>
 
           <div>
             <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block">
-              Terminus Arrival
+              First Departure
             </span>
             <span className="text-base sm:text-lg font-black text-neutral-900 mt-0.5 block">
-              {lastArr}
+              {formattedFirstDeparture}
+            </span>
+          </div>
+
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block">
+              Last Departure
+            </span>
+            <span className="text-base sm:text-lg font-black text-neutral-900 mt-0.5 block">
+              {formattedLastDeparture}
             </span>
           </div>
 
@@ -331,17 +329,17 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
               Active Service
             </span>
             <span className="text-base sm:text-lg font-black text-neutral-900 mt-0.5 block truncate">
-              {selectedTrip?.service_id || (hasTrips ? 'Regular' : 'N/A')}
+              {activeServiceNames.length > 0 ? activeServiceNames.join(', ') : 'None today'}
             </span>
           </div>
         </div>
       </div>
 
       {/* ─────────────────────────────────────────────────────────────
-          NEXT SCHEDULED BUS SECTION (Real GTFS Timetable & Device Clock)
+          UPCOMING DEPARTURES TODAY (Real GTFS Timetable & Live Clock)
           ───────────────────────────────────────────────────────────── */}
       {hasTrips && (
-        <div className="mt-8 rounded-3xl border border-black/10 bg-gradient-to-br from-white to-neutral-50 p-6 sm:p-8 shadow-sm">
+        <div className="mt-8 rounded-3xl border border-black/10 bg-white p-6 sm:p-8 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-black/5">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-black text-white flex items-center justify-center">
@@ -349,86 +347,214 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
               </div>
               <div>
                 <span className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                  Scheduled Service Timing
+                  Live Service Status
                 </span>
                 <h2 className="text-lg font-black text-neutral-900">
-                  Next Scheduled Departure
+                  Upcoming Departures Today
                 </h2>
               </div>
             </div>
 
-            <div className="text-xs text-neutral-500 font-mono">
-              Chennai Time (UTC+05:30):{' '}
-              <span className="font-bold text-neutral-800">
-                {nextDeparture?.currentTimeInChennai || 'Calculating...'}
+            <div className="flex items-center gap-2 text-xs text-neutral-600 bg-neutral-100/80 border border-black/5 px-3.5 py-1.5 rounded-full font-mono">
+              <Clock className="w-3.5 h-3.5 text-neutral-500" />
+              <span>
+                Chennai Time (UTC+05:30):{' '}
+                <strong className="text-neutral-900">{chennaiTime.formattedTime12}</strong>
               </span>
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
-            {/* Main Next Scheduled Bus Pill */}
-            <div className="md:col-span-1 p-5 rounded-2xl bg-black text-white shadow-md">
-              <span className="text-[11px] font-bold uppercase tracking-widest text-neutral-400 block">
-                Next Scheduled Bus
-              </span>
-              <div className="mt-2 flex items-baseline gap-3">
-                <span className="text-3xl font-black tracking-tight">
-                  {route.route_short_name || route.route_id}
-                </span>
-                <span className="text-xl font-bold text-emerald-400">
-                  {nextDeparture?.formattedNextDeparture || 'N/A'}
-                </span>
+          {/* If there are upcoming departures remaining today */}
+          {nextDepartureTrip ? (
+            <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
+              {/* Next Scheduled Bus Highlight */}
+              <div
+                onClick={() => handleTripChange(nextDepartureTrip.trip_id)}
+                className="md:col-span-1 p-5 rounded-2xl bg-black text-white shadow-md cursor-pointer hover:bg-neutral-900 transition"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-neutral-400 block">
+                    Next Scheduled Bus
+                  </span>
+                  {nextDepartureMinutes !== null && (
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider bg-emerald-500 text-black px-2 py-0.5 rounded-full">
+                      {nextDepartureMinutes === 0 ? 'Departing Now' : `In ${nextDepartureMinutes}m`}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-2 flex items-baseline gap-3">
+                  <span className="text-3xl font-black tracking-tight">
+                    {route.route_short_name || route.route_id}
+                  </span>
+                  <span className="text-2xl font-black text-emerald-400">
+                    {nextDepartureTrip.formatted_departure_time}
+                  </span>
+                </div>
+
+                <p className="mt-2 text-xs text-neutral-300 flex items-center gap-1.5">
+                  <Navigation className="w-3.5 h-3.5 text-neutral-400 inline shrink-0" />
+                  <span className="truncate">From {corridorOrigin || 'Origin'}</span>
+                </p>
               </div>
-              <p className="mt-2 text-xs text-neutral-300">
-                {nextDeparture?.originStopName
-                  ? `From ${nextDeparture.originStopName}`
-                  : firstStop !== 'N/A'
-                  ? `From ${firstStop}`
-                  : 'Scheduled GTFS service'}
-              </p>
+
+              {/* Subsequent Upcoming Departures Today */}
+              <div className="md:col-span-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-neutral-500 block mb-2.5">
+                  Subsequent Departures Today ({dynamicUpcomingDepartures.length} remaining)
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {dynamicUpcomingDepartures.map((item, idx) => {
+                    const isSelected = selectedTripId === item.trip_id;
+                    const isFirstUpcoming = idx === 0;
+
+                    return (
+                      <button
+                        key={item.trip_id}
+                        onClick={() => handleTripChange(item.trip_id)}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-black text-white border-black shadow-sm'
+                            : isFirstUpcoming
+                            ? 'bg-emerald-50 text-emerald-900 border-emerald-300 hover:border-emerald-500'
+                            : 'bg-white text-neutral-800 border-neutral-200 hover:border-black/40'
+                        }`}
+                      >
+                        {item.formatted_departure_time}
+                        {isFirstUpcoming && ' (Next)'}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 text-[11px] text-neutral-400 flex items-center gap-1.5">
+                  <Sparkles className="w-3 h-3 text-neutral-500" />
+                  <span>
+                    Click any upcoming departure to preview its specific stop timetable below.
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* No more departures remaining today */
+            <div className="mt-6 rounded-2xl bg-neutral-50 border border-neutral-200 p-6">
+              <div className="flex items-start gap-3.5">
+                <CalendarOff className="w-5 h-5 text-neutral-500 shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900">
+                    {scheduledTripsCount > 0
+                      ? 'No more scheduled departures remaining today.'
+                      : 'No scheduled service for this route is available today.'}
+                  </h3>
+                  <p className="text-xs text-neutral-600 mt-1">
+                    {nextServiceInfo
+                      ? nextServiceInfo.isTomorrow
+                        ? `Earliest service tomorrow: ${nextServiceInfo.formattedEarliestDeparture || 'Check schedule'}`
+                        : `Next scheduled service: ${nextServiceInfo.formattedDate} at ${nextServiceInfo.formattedEarliestDeparture || 'N/A'}`
+                      : scheduledTripsCount > 0
+                      ? `Earliest service tomorrow: ${formattedFirstDeparture}`
+                      : 'This corridor operates on specific service calendar days.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────
+          TODAY'S COMPLETE SCHEDULE (ALL Scheduled Departures for the Day)
+          ───────────────────────────────────────────────────────────── */}
+      {hasTrips && todaySchedule.length > 0 && (
+        <div className="mt-8 rounded-3xl border border-black/10 bg-white p-6 sm:p-8 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-black/5">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-black text-white flex items-center justify-center">
+                <Calendar className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-neutral-500">
+                  Full Day Timetable
+                </span>
+                <h2 className="text-lg font-black text-neutral-900">
+                  Today's Schedule ({todaySchedule.length} Departures)
+                </h2>
+              </div>
             </div>
 
-            {/* Upcoming departures later today */}
-            <div className="md:col-span-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-neutral-500 block mb-2.5">
-                Upcoming Departures Today (Chronological)
-              </span>
-              {nextDeparture && nextDeparture.upcomingDepartures.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  {nextDeparture.upcomingDepartures.map((time, i) => (
+            <span className="text-xs font-medium text-neutral-500">
+              From {corridorOrigin || 'Origin'}
+            </span>
+          </div>
+
+          <p className="mt-3 text-xs text-neutral-500">
+            All scheduled departures for today in chronological order. Click any departure to load its
+            exact ordered stop timetable below.
+          </p>
+
+          <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5">
+            {todaySchedule.map((trip) => {
+              const isPast = trip.departure_time_seconds < currentChennaiSecs;
+              const isNext = nextDepartureTrip?.trip_id === trip.trip_id;
+              const isSelected = selectedTripId === trip.trip_id;
+
+              return (
+                <button
+                  key={trip.trip_id}
+                  onClick={() => handleTripChange(trip.trip_id)}
+                  className={`p-3 rounded-xl border text-left transition cursor-pointer flex flex-col justify-between ${
+                    isSelected
+                      ? 'bg-black text-white border-black shadow-sm ring-2 ring-black/20'
+                      : isNext
+                      ? 'bg-emerald-50 border-emerald-400 text-emerald-950 hover:bg-emerald-100/70'
+                      : isPast
+                      ? 'bg-neutral-50/80 border-neutral-200 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900'
+                      : 'bg-white border-neutral-200 text-neutral-900 hover:border-black/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-xs font-mono font-bold">
+                      {trip.formatted_departure_time}
+                    </span>
+                    {isNext && (
+                      <span className="text-[9px] font-black uppercase tracking-wider bg-emerald-600 text-white px-1.5 py-0.5 rounded-full">
+                        Next
+                      </span>
+                    )}
+                    {isSelected && !isNext && (
+                      <CheckCircle2 className="w-3 h-3 text-white" />
+                    )}
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-between text-[10px]">
                     <span
-                      key={i}
-                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition ${
-                        i === 0
-                          ? 'bg-black text-white border-black'
-                          : 'bg-white text-neutral-800 border-neutral-200 hover:border-black/30'
+                      className={
+                        isSelected
+                          ? 'text-neutral-300'
+                          : isPast
+                          ? 'text-neutral-400'
+                          : 'text-neutral-500'
+                      }
+                    >
+                      {isPast ? 'Departed' : isNext ? 'Next up' : 'Scheduled'}
+                    </span>
+                    <span
+                      className={`font-mono text-[9px] ${
+                        isSelected ? 'text-neutral-400' : 'text-neutral-400'
                       }`}
                     >
-                      {formatTimeTo12Hour(time)}
+                      {trip.service_id}
                     </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-neutral-500">
-                  {nextDeparture && nextDeparture.allDeparturesToday.length > 0
-                    ? 'No more scheduled departures remaining today. Earliest service tomorrow: ' +
-                      formatTimeTo12Hour(nextDeparture.allDeparturesToday[0])
-                    : 'Scheduled departures vary by operating calendar.'}
-                </p>
-              )}
-              <div className="mt-3 text-[11px] text-neutral-400 flex items-center gap-1.5">
-                <Sparkles className="w-3 h-3 text-neutral-500" />
-                <span>
-                  Calculated from scheduled GTFS timetable matching today's service calendar.
-                </span>
-              </div>
-            </div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
       {/* ─────────────────────────────────────────────────────────────
-          ZERO TRIPS HANDLING (Exact Requirement #4)
+          ZERO TRIPS HANDLING
           ───────────────────────────────────────────────────────────── */}
       {!hasTrips && (
         <div className="mt-10 rounded-3xl border border-dashed border-neutral-300 bg-white p-8 sm:p-12 text-center">
@@ -439,7 +565,7 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
             No Scheduled Trips Available
           </h2>
           <p className="mt-2 text-sm text-neutral-600 max-w-md mx-auto">
-            No scheduled trips available in the current GTFS dataset.
+            No scheduled trips available in the current GTFS dataset for this corridor.
           </p>
           <div className="mt-6">
             <button
@@ -453,21 +579,28 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
       )}
 
       {/* ─────────────────────────────────────────────────────────────
-          STOPS SEQUENCE SECTION (Exact Requirement #3)
+          STOPS SEQUENCE SECTION
           ───────────────────────────────────────────────────────────── */}
       {hasTrips && (
         <div className="mt-10">
-          <div className="flex items-center justify-between pb-4 border-b border-neutral-200">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-neutral-200">
             <div>
-              <h2 className="text-2xl font-bold tracking-tight text-neutral-900">
-                Ordered Stop Sequence
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-2xl font-bold tracking-tight text-neutral-900">
+                  Ordered Stop Sequence
+                </h2>
+                {selectedTrip && (
+                  <span className="text-xs font-mono bg-neutral-100 text-neutral-700 px-2.5 py-0.5 rounded-md">
+                    Trip {selectedTrip.trip_id}
+                  </span>
+                )}
+              </div>
               <p className="text-xs sm:text-sm text-neutral-500 mt-0.5">
-                Live GTFS stops with scheduled arrival/departure times along this corridor.
+                Stop sequence and arrival times for this trip along the corridor.
               </p>
             </div>
 
-            <span className="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-neutral-200 text-neutral-800">
+            <span className="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-neutral-200 text-neutral-800 shrink-0 self-start sm:self-auto">
               {stops.length} Stops
             </span>
           </div>
@@ -570,3 +703,4 @@ export const RouteDetailPage: React.FC<RouteDetailPageProps> = ({
     </div>
   );
 };
+

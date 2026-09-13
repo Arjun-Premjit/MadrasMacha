@@ -10,18 +10,22 @@ import {
   Loader2,
   AlertCircle,
   ExternalLink,
-  ShieldCheck,
+  ChevronRight,
+  X,
+  Compass,
 } from 'lucide-react';
 
 interface MetroPageProps {
   routes?: Route[];
   onSelectRoute: (route: Route) => void;
+  onSelectStop?: (stop: Stop) => void;
 }
 
-export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
+export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute, onSelectStop }) => {
   const [metroRoutes, setMetroRoutes] = useState<Route[]>([]);
   const [metroStops, setMetroStops] = useState<Stop[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<string>('CMRL_1');
+  const [activeStationModal, setActiveStationModal] = useState<Stop | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -127,10 +131,9 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
         )}
       </div>
 
-      {/* Static Metro Train Visual (No Watermark, No Animations) */}
+      {/* Metro Train Visual with Animation */}
       <div className="my-8 py-4 bg-white rounded-3xl border border-black/10 p-6 sm:p-10 shadow-xs flex flex-col items-center justify-center">
-        {/* Kept STATIC with no animations and no watermark */}
-        <MetroTrain3D isStatic={true} showWatermark={false} className="w-full max-w-4xl mx-auto" />
+        <MetroTrain3D isStatic={false} showWatermark={false} className="w-full max-w-4xl mx-auto" />
       </div>
 
       {/* Error Banner */}
@@ -271,18 +274,28 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
                   return (
                     <div
                       key={station.stop_id}
-                      className={`flex items-center justify-between p-4 rounded-2xl bg-white border transition-all shadow-2xs ${
+                      onClick={() => {
+                        if (onSelectStop) {
+                          onSelectStop(station);
+                        } else {
+                          setActiveStationModal(station);
+                        }
+                      }}
+                      className={`group flex items-center justify-between p-4 rounded-2xl bg-white border transition-all shadow-2xs cursor-pointer hover:border-black/30 hover:shadow-sm ${
                         isTerminal
-                          ? 'border-black/20 bg-neutral-50/50'
-                          : 'border-black/5 hover:border-black/20'
+                          ? 'border-black/20 bg-neutral-50/60'
+                          : 'border-black/5 hover:bg-neutral-50/40'
                       }`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`View details for ${station.stop_name}`}
                     >
                       <div className="flex items-center gap-3.5">
                         <div
-                          className={`w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-bold shrink-0 ${
+                          className={`w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-bold shrink-0 transition-colors ${
                             isTerminal
-                              ? 'bg-black text-white'
-                              : 'bg-neutral-100 text-neutral-700'
+                              ? 'bg-black text-white group-hover:bg-neutral-800'
+                              : 'bg-neutral-100 text-neutral-700 group-hover:bg-black group-hover:text-white'
                           }`}
                         >
                           {idx + 1}
@@ -290,7 +303,7 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
 
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-neutral-900">
+                            <span className="text-sm font-bold text-neutral-900 group-hover:text-black">
                               {station.stop_name}
                             </span>
                             {isTerminal && (
@@ -314,10 +327,11 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
                         </div>
                       </div>
 
-                      <div className="text-right shrink-0">
-                        <span className="text-[11px] font-medium text-neutral-400">
+                      <div className="flex items-center gap-2 text-right shrink-0">
+                        <span className="text-[11px] font-medium text-neutral-400 hidden sm:inline">
                           {isTerminal ? 'Scheduled Terminus' : 'Active Station'}
                         </span>
+                        <ChevronRight className="w-4 h-4 text-neutral-400 group-hover:text-black group-hover:translate-x-0.5 transition-all" />
                       </div>
                     </div>
                   );
@@ -327,6 +341,80 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
           </div>
         </div>
       ) : null}
+
+      {/* Interactive Metro Station Modal */}
+      {activeStationModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-neutral-200 p-6 sm:p-8 font-sans">
+            <div className="flex items-start justify-between pb-4 border-b border-neutral-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-2xl bg-black text-white flex items-center justify-center">
+                  <Train className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 block">
+                    Metro Station Details
+                  </span>
+                  <h3 className="text-xl font-black text-neutral-900 mt-0.5">
+                    {activeStationModal.stop_name}
+                  </h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveStationModal(null)}
+                className="p-1.5 rounded-full hover:bg-neutral-100 text-neutral-500 hover:text-black transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                  <span className="text-[10px] font-bold uppercase text-neutral-400 block">Station ID</span>
+                  <span className="font-mono font-bold text-neutral-900 mt-1 block">{activeStationModal.stop_id}</span>
+                </div>
+                <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                  <span className="text-[10px] font-bold uppercase text-neutral-400 block">Agency</span>
+                  <span className="font-bold text-neutral-900 mt-1 block">Chennai Metro (CMRL)</span>
+                </div>
+              </div>
+
+              {activeStationModal.stop_lat && activeStationModal.stop_lon && (
+                <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-neutral-400 block">GPS Coordinates</span>
+                    <span className="font-mono text-neutral-800 mt-0.5 block">
+                      {Number(activeStationModal.stop_lat).toFixed(5)}° N, {Number(activeStationModal.stop_lon).toFixed(5)}° E
+                    </span>
+                  </div>
+                  <Compass className="w-4 h-4 text-neutral-400" />
+                </div>
+              )}
+
+              <p className="text-neutral-500 text-[11px] leading-relaxed">
+                Operating on Chennai Metro Rail corridors. Departures and connection timetables are indexed in the MadrasMacha GTFS directory.
+              </p>
+
+              <div className="pt-2 flex flex-col gap-2">
+                {onSelectStop && (
+                  <button
+                    onClick={() => {
+                      const stopToSelect = activeStationModal;
+                      setActiveStationModal(null);
+                      onSelectStop(stopToSelect);
+                    }}
+                    className="w-full rounded-full bg-black hover:bg-neutral-800 text-white font-bold py-3 transition flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+                  >
+                    <span>Explore Station &amp; Timetable</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

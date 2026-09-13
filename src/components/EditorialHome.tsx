@@ -73,16 +73,16 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
           </div>
         </div>
 
-        {/* Authentic MTC Bus Photo with Left-to-Right Animation */}
+        {/* Authentic MTC Bus Photo with Decorative Watermark */}
         <div className="w-full my-6 flex justify-center overflow-visible">
           <div className="w-full max-w-5xl">
-            <MtcBus3D className="w-full" />
+            <MtcBus3D isStatic={true} showWatermark={true} className="w-full" />
           </div>
         </div>
       </section>
 
       {/* ─────────────────────────────────────────────────────────────
-          METRO SECTION: PURE METRO WITH LEFT-TO-RIGHT ANIMATION
+          METRO SECTION: PURE METRO WITH DECORATIVE WATERMARK
           ───────────────────────────────────────────────────────────── */}
       <section
         id="metro-section"
@@ -112,10 +112,10 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
           </div>
         </div>
 
-        {/* Authentic Chennai Metro Photo with Left-to-Right Animation */}
+        {/* Authentic Chennai Metro Photo with Decorative Watermark */}
         <div className="w-full my-6 flex justify-center overflow-visible">
           <div className="w-full max-w-5xl">
-            <MetroTrain3D className="w-full" />
+            <MetroTrain3D isStatic={true} showWatermark={true} className="w-full" />
           </div>
         </div>
       </section>

@@ -83,13 +83,13 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
       className={`relative select-none w-full flex flex-col items-center justify-center overflow-hidden ${className}`}
     >
       <div className="relative w-full max-w-5xl flex items-center justify-center px-4 py-8 overflow-visible">
-        {/* Architectural Watermark Behind the Bus */}
+        {/* Decorative Watermark Behind the Bus (Landing Page Only) */}
         {showWatermark && (
           <div
             aria-hidden="true"
-            className="absolute top-2 sm:top-5 md:top-6 left-1/2 -translate-x-1/2 z-0 pointer-events-none select-none whitespace-nowrap overflow-visible w-full text-center px-4"
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-0 pointer-events-none select-none whitespace-nowrap overflow-visible w-full text-center px-4"
           >
-            <span className="text-xl sm:text-3xl md:text-5xl lg:text-6xl font-black tracking-tight uppercase text-neutral-900/[0.08] leading-none inline-block">
+            <span className="text-3xl sm:text-5xl md:text-7xl lg:text-8xl font-black tracking-tight uppercase text-neutral-900/[0.09] leading-none inline-block">
               NEXT STOP: MARINA
             </span>
           </div>

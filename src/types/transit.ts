@@ -82,3 +82,16 @@ export interface SearchFilterState {
   originQuery: string;
   destinationQuery: string;
 }
+
+export interface GroupedStop {
+  id: string; // Unique group identifier
+  stop_id?: string; // Primary stop_id for compatibility
+  displayName: string; // Clean user-facing stop name
+  stopIds: string[]; // All matching GTFS stop_ids (e.g. opposite sides of road, bays)
+  lat: number | null;
+  lon: number | null;
+  stopsCount: number;
+  locationInfo?: string; // Contextual display e.g. "12.9786° N, 80.2522° E · 3 stop points"
+  isMetro: boolean;
+  sampleStop: Stop;
+}

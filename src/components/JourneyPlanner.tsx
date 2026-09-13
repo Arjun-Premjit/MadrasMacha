@@ -4,11 +4,12 @@ import {
   findDirectJourneys,
   fetchCompleteJourney,
   JourneyMatch,
+  GroupedRouteJourney,
   CompleteJourneyResult,
   formatTimeTo12Hour,
-  getChennaiDateTime,
 } from '../lib/supabase/transitService';
-import { Stop } from '../types/transit';
+import { GroupedStop, Stop } from '../types/transit';
+import { useChennaiTime } from '../hooks/useChennaiTime';
 import {
   Search,
   ArrowRight,
@@ -18,11 +19,15 @@ import {
   Bus,
   Train,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Loader2,
   X,
   Sparkles,
   Info,
   Calendar,
+  Layers,
+  Compass,
 } from 'lucide-react';
 
 interface JourneyPlannerProps {
@@ -38,21 +43,30 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
   const [fromQuery, setFromQuery] = useState('');
   const [toQuery, setToQuery] = useState('');
 
-  const [selectedFromStop, setSelectedFromStop] = useState<Stop | null>(null);
-  const [selectedToStop, setSelectedToStop] = useState<Stop | null>(null);
+  const [selectedFromStop, setSelectedFromStop] = useState<GroupedStop | null>(null);
+  const [selectedToStop, setSelectedToStop] = useState<GroupedStop | null>(null);
 
   // Autocomplete dropdowns
-  const [fromSuggestions, setFromSuggestions] = useState<Stop[]>([]);
-  const [toSuggestions, setToSuggestions] = useState<Stop[]>([]);
+  const [fromSuggestions, setFromSuggestions] = useState<GroupedStop[]>([]);
+  const [toSuggestions, setToSuggestions] = useState<GroupedStop[]>([]);
   const [isSearchingFrom, setIsSearchingFrom] = useState(false);
   const [isSearchingTo, setIsSearchingTo] = useState(false);
   const [showFromDropdown, setShowFromDropdown] = useState(false);
   const [showToDropdown, setShowToDropdown] = useState(false);
 
   // Journey results state
-  const [journeys, setJourneys] = useState<JourneyMatch[] | null>(null);
+  const [groupedJourneys, setGroupedJourneys] = useState<GroupedRouteJourney[] | null>(null);
+  const [flatJourneys, setFlatJourneys] = useState<JourneyMatch[] | null>(null);
+  const [resolvedFromStop, setResolvedFromStop] = useState<Stop | null>(null);
+  const [resolvedToStop, setResolvedToStop] = useState<Stop | null>(null);
+  const [viewMode, setViewMode] = useState<'grouped' | 'chronological'>('grouped');
+  const [expandedRoutes, setExpandedRoutes] = useState<Record<string, boolean>>({});
+
   const [isFindingRoutes, setIsFindingRoutes] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Live Chennai clock
+  const { formattedTime12 } = useChennaiTime();
 
   // Complete Journey Modal state
   const [activeModalTrip, setActiveModalTrip] = useState<{
@@ -69,7 +83,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
 
   // Debounced search for "From" stop
   useEffect(() => {
-    if (!fromQuery.trim() || selectedFromStop?.stop_name === fromQuery) {
+    if (!fromQuery.trim() || selectedFromStop?.displayName === fromQuery) {
       setFromSuggestions([]);
       setIsSearchingFrom(false);
       return;
@@ -88,7 +102,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
 
   // Debounced search for "To" stop
   useEffect(() => {
-    if (!toQuery.trim() || selectedToStop?.stop_name === toQuery) {
+    if (!toQuery.trim() || selectedToStop?.displayName === toQuery) {
       setToSuggestions([]);
       setIsSearchingTo(false);
       return;
@@ -124,10 +138,19 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     const prevFrom = selectedFromStop;
     const prevFromQuery = fromQuery;
     setSelectedFromStop(selectedToStop);
-    setFromQuery(selectedToStop?.stop_name || toQuery);
+    setFromQuery(selectedToStop?.displayName || toQuery);
     setSelectedToStop(prevFrom);
-    setToQuery(prevFrom?.stop_name || prevFromQuery);
-    setJourneys(null);
+    setToQuery(prevFrom?.displayName || prevFromQuery);
+    setGroupedJourneys(null);
+    setFlatJourneys(null);
+  };
+
+  // Toggle route trip expansion
+  const toggleRouteExpand = (routeId: string) => {
+    setExpandedRoutes((prev) => ({
+      ...prev,
+      [routeId]: !prev[routeId],
+    }));
   };
 
   // Run Direct Journey algorithm
@@ -138,30 +161,38 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
       return;
     }
 
-    if (selectedFromStop.stop_id === selectedToStop.stop_id) {
-      setSearchError('Origin and Destination stops must be different.');
+    if (
+      selectedFromStop.id === selectedToStop.id ||
+      selectedFromStop.displayName.toLowerCase() === selectedToStop.displayName.toLowerCase()
+    ) {
+      setSearchError('Origin and destination cannot be the same stop location.');
       return;
     }
 
     setIsFindingRoutes(true);
     setSearchError(null);
-    setJourneys(null);
+    setGroupedJourneys(null);
+    setFlatJourneys(null);
 
     try {
-      const res = await findDirectJourneys(selectedFromStop.stop_id, selectedToStop.stop_id);
+      const res = await findDirectJourneys(selectedFromStop, selectedToStop);
       if (res.error) {
         setSearchError(res.error);
       } else {
-        setJourneys(res.journeys);
+        setGroupedJourneys(res.groupedJourneys);
+        setFlatJourneys(res.journeys);
+        setResolvedFromStop(res.fromStop);
+        setResolvedToStop(res.toStop);
       }
     } catch (err: any) {
-      setSearchError(err?.message || 'Failed to calculate direct journeys.');
+      console.error('Find routes error:', err);
+      setSearchError(err?.message || 'Failed to search direct journeys in GTFS database.');
     } finally {
       setIsFindingRoutes(false);
     }
   };
 
-  // Open Complete Journey modal
+  // Open complete journey modal
   const handleViewJourney = async (journey: JourneyMatch) => {
     setActiveModalTrip({
       tripId: journey.trip_id,
@@ -175,8 +206,8 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     try {
       const res = await fetchCompleteJourney(
         journey.trip_id,
-        journey.from_stop.stop_id,
-        journey.to_stop.stop_id
+        selectedFromStop ? selectedFromStop.stopIds : journey.from_stop.stop_id,
+        selectedToStop ? selectedToStop.stopIds : journey.to_stop.stop_id
       );
       if (res.error || !res.data) {
         setCompleteJourneyError(res.error || 'Unable to retrieve complete journey stop sequence.');
@@ -184,31 +215,39 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
         setCompleteJourney(res.data);
       }
     } catch (err: any) {
+      console.error('Fetch journey modal error:', err);
       setCompleteJourneyError(err?.message || 'Failed to fetch complete journey details');
     } finally {
       setLoadingCompleteJourney(false);
     }
   };
 
-  const { formattedTime12 } = getChennaiDateTime(new Date());
+  const totalDirectTrips = flatJourneys ? flatJourneys.length : 0;
+  const totalDirectRoutes = groupedJourneys ? groupedJourneys.length : 0;
 
   return (
-    <div className="w-full max-w-4xl mx-auto font-sans">
-      {/* Container Card */}
-      <div className="rounded-3xl border border-black/10 bg-white p-6 sm:p-8 shadow-sm">
-        <div className="flex items-center justify-between pb-6 border-b border-neutral-100">
+    <div className="w-full">
+      <div className="bg-white rounded-3xl border border-black/10 p-6 sm:p-8 shadow-xs">
+        {/* Header with Live Dynamic Chennai Clock */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-neutral-100">
           <div>
-            <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 block">
-              GTFS Routing Engine
-            </span>
-            <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900 mt-1">
+            <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-black/5 text-[11px] font-bold uppercase tracking-wider text-black/70 mb-1.5">
+              <Compass className="w-3.5 h-3.5 text-black" />
+              <span>GTFS Routing Engine</span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
               Plan Your Journey
             </h2>
+            <p className="text-xs text-neutral-500 mt-1">
+              Find direct MTC buses and Metro rail connections across Greater Chennai
+            </p>
           </div>
 
-          <div className="hidden sm:flex items-center gap-2 text-xs font-semibold text-neutral-500 bg-neutral-100 px-3.5 py-1.5 rounded-full">
+          {/* Dynamic Live Chennai Time (Asia/Kolkata UTC+05:30) */}
+          <div className="flex items-center gap-2 text-xs font-semibold text-neutral-700 bg-neutral-100/90 border border-neutral-200/80 px-4 py-2 rounded-full font-mono self-start sm:self-auto shadow-2xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <Clock className="w-3.5 h-3.5 text-neutral-600" />
-            <span>Chennai Time: {formattedTime12}</span>
+            <span>Chennai Time: <strong className="text-neutral-900 font-bold">{formattedTime12}</strong></span>
           </div>
         </div>
 
@@ -218,7 +257,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
             {/* FROM Stop Input */}
             <div ref={fromRef} className="relative">
               <label className="text-xs font-bold uppercase tracking-wider text-neutral-500 block mb-1.5">
-                From
+                From (Origin Stop)
               </label>
               <div className="relative flex items-center">
                 <MapPin className="absolute left-3.5 w-4 h-4 text-neutral-400" />
@@ -227,14 +266,14 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                   value={fromQuery}
                   onChange={(e) => {
                     setFromQuery(e.target.value);
-                    if (selectedFromStop && selectedFromStop.stop_name !== e.target.value) {
+                    if (selectedFromStop && selectedFromStop.displayName !== e.target.value) {
                       setSelectedFromStop(null);
                     }
                   }}
                   onFocus={() => {
                     if (fromSuggestions.length > 0) setShowFromDropdown(true);
                   }}
-                  placeholder="Search origin stop (e.g. Anna Nagar)..."
+                  placeholder="Search origin stop (e.g. SRP Tools, Broadway)..."
                   className="w-full pl-10 pr-9 py-3 rounded-2xl bg-neutral-50 border border-neutral-200 text-neutral-900 text-sm font-medium placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-black/15 focus:bg-white transition"
                 />
                 {isSearchingFrom && (
@@ -247,7 +286,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                       setSelectedFromStop(null);
                       setFromQuery('');
                     }}
-                    className="absolute right-3 p-1 text-neutral-400 hover:text-black"
+                    className="absolute right-3 p-1 text-neutral-400 hover:text-black cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -256,29 +295,46 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
 
               {/* Suggestions Dropdown for FROM */}
               {showFromDropdown && fromSuggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-56 overflow-y-auto p-1.5 space-y-1">
-                  {fromSuggestions.map((stop) => (
-                    <button
-                      key={stop.stop_id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedFromStop(stop);
-                        setFromQuery(stop.stop_name);
-                        setShowFromDropdown(false);
-                      }}
-                      className="w-full text-left px-3 py-2 rounded-xl text-xs sm:text-sm hover:bg-neutral-100 flex items-center justify-between cursor-pointer transition"
-                    >
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
-                        <span className="font-semibold text-neutral-900 line-clamp-1">
-                          {stop.stop_name}
-                        </span>
-                      </div>
-                      <span className="text-[10px] font-mono text-neutral-400 bg-neutral-50 px-1.5 py-0.5 rounded shrink-0">
-                        {stop.stop_id}
-                      </span>
-                    </button>
-                  ))}
+                <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-64 overflow-y-auto p-1.5 space-y-1">
+                  {fromSuggestions.map((stop) => {
+                    const isMetro = stop.isMetro ?? Boolean(stop.id && typeof stop.id === 'string' && stop.id.startsWith('CMRL'));
+                    return (
+                      <button
+                        key={stop.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedFromStop(stop);
+                          setFromQuery(stop.displayName);
+                          setShowFromDropdown(false);
+                        }}
+                        className="w-full text-left px-3 py-2.5 rounded-xl text-xs sm:text-sm hover:bg-neutral-100 flex items-center justify-between cursor-pointer transition group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${
+                            isMetro ? 'bg-blue-50 text-blue-600' : 'bg-neutral-100 text-neutral-700'
+                          }`}>
+                            {isMetro ? <Train className="w-3.5 h-3.5" /> : <Bus className="w-3.5 h-3.5" />}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="font-bold text-neutral-900 block truncate group-hover:text-black">
+                              {stop.displayName}
+                            </span>
+                            <span className="text-[11px] text-neutral-400 block truncate">
+                              {stop.stopIds.length > 1
+                                ? `Grouped stop (${stop.stopIds.length} nearby platforms)`
+                                : `Stop ID: ${stop.id}`}
+                            </span>
+                          </div>
+                        </div>
+
+                        {stop.lat != null && stop.lon != null && (
+                          <span className="text-[10px] font-mono text-neutral-400 bg-neutral-50 px-2 py-0.5 rounded-md shrink-0 ml-2">
+                            {Number(stop.lat).toFixed(3)}°, {Number(stop.lon).toFixed(3)}°
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -298,7 +354,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
             {/* TO Stop Input */}
             <div ref={toRef} className="relative">
               <label className="text-xs font-bold uppercase tracking-wider text-neutral-500 block mb-1.5">
-                To
+                To (Destination Stop)
               </label>
               <div className="relative flex items-center">
                 <MapPin className="absolute left-3.5 w-4 h-4 text-neutral-400" />
@@ -307,14 +363,14 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                   value={toQuery}
                   onChange={(e) => {
                     setToQuery(e.target.value);
-                    if (selectedToStop && selectedToStop.stop_name !== e.target.value) {
+                    if (selectedToStop && selectedToStop.displayName !== e.target.value) {
                       setSelectedToStop(null);
                     }
                   }}
                   onFocus={() => {
                     if (toSuggestions.length > 0) setShowToDropdown(true);
                   }}
-                  placeholder="Search destination stop (e.g. Central)..."
+                  placeholder="Search destination stop (e.g. Marina Beach, Central)..."
                   className="w-full pl-10 pr-9 py-3 rounded-2xl bg-neutral-50 border border-neutral-200 text-neutral-900 text-sm font-medium placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-black/15 focus:bg-white transition"
                 />
                 {isSearchingTo && (
@@ -327,7 +383,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                       setSelectedToStop(null);
                       setToQuery('');
                     }}
-                    className="absolute right-3 p-1 text-neutral-400 hover:text-black"
+                    className="absolute right-3 p-1 text-neutral-400 hover:text-black cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -336,29 +392,46 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
 
               {/* Suggestions Dropdown for TO */}
               {showToDropdown && toSuggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-56 overflow-y-auto p-1.5 space-y-1">
-                  {toSuggestions.map((stop) => (
-                    <button
-                      key={stop.stop_id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedToStop(stop);
-                        setToQuery(stop.stop_name);
-                        setShowToDropdown(false);
-                      }}
-                      className="w-full text-left px-3 py-2 rounded-xl text-xs sm:text-sm hover:bg-neutral-100 flex items-center justify-between cursor-pointer transition"
-                    >
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
-                        <span className="font-semibold text-neutral-900 line-clamp-1">
-                          {stop.stop_name}
-                        </span>
-                      </div>
-                      <span className="text-[10px] font-mono text-neutral-400 bg-neutral-50 px-1.5 py-0.5 rounded shrink-0">
-                        {stop.stop_id}
-                      </span>
-                    </button>
-                  ))}
+                <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-64 overflow-y-auto p-1.5 space-y-1">
+                  {toSuggestions.map((stop) => {
+                    const isMetro = stop.isMetro ?? Boolean(stop.id && typeof stop.id === 'string' && stop.id.startsWith('CMRL'));
+                    return (
+                      <button
+                        key={stop.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedToStop(stop);
+                          setToQuery(stop.displayName);
+                          setShowToDropdown(false);
+                        }}
+                        className="w-full text-left px-3 py-2.5 rounded-xl text-xs sm:text-sm hover:bg-neutral-100 flex items-center justify-between cursor-pointer transition group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${
+                            isMetro ? 'bg-blue-50 text-blue-600' : 'bg-neutral-100 text-neutral-700'
+                          }`}>
+                            {isMetro ? <Train className="w-3.5 h-3.5" /> : <Bus className="w-3.5 h-3.5" />}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="font-bold text-neutral-900 block truncate group-hover:text-black">
+                              {stop.displayName}
+                            </span>
+                            <span className="text-[11px] text-neutral-400 block truncate">
+                              {stop.stopIds.length > 1
+                                ? `Grouped stop (${stop.stopIds.length} nearby platforms)`
+                                : `Stop ID: ${stop.id}`}
+                            </span>
+                          </div>
+                        </div>
+
+                        {stop.lat != null && stop.lon != null && (
+                          <span className="text-[10px] font-mono text-neutral-400 bg-neutral-50 px-2 py-0.5 rounded-md shrink-0 ml-2">
+                            {Number(stop.lat).toFixed(3)}°, {Number(stop.lon).toFixed(3)}°
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -375,7 +448,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
           {/* Submit Action */}
           <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-[11px] text-neutral-500">
-              Direct bus journeys only · Scheduled GTFS stop-sequence and timetable comparison
+              Direct journeys only · Validates stop sequence (Origin &lt; Destination) across scheduled GTFS trips
             </div>
 
             <button
@@ -399,148 +472,336 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
         </form>
 
         {/* ─────────────────────────────────────────────────────────────
-            JOURNEY RESULTS LIST (Requirement #9)
+            JOURNEY RESULTS SECTION
             ───────────────────────────────────────────────────────────── */}
-        {journeys !== null && (
+        {groupedJourneys !== null && (
           <div className="mt-10 pt-8 border-t border-neutral-100 animate-in fade-in duration-200">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4">
+            {/* Results Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4">
               <div>
-                <h3 className="text-lg font-black text-neutral-900">
-                  Available Scheduled Journeys
+                <h3 className="text-xl font-black text-neutral-900">
+                  Available Scheduled Services
                 </h3>
-                <p className="text-xs text-neutral-500">
-                  {selectedFromStop?.stop_name} → {selectedToStop?.stop_name}
+                <p className="text-xs text-neutral-500 mt-0.5">
+                  {selectedFromStop?.displayName} → {selectedToStop?.displayName}
                 </p>
               </div>
 
-              <span className="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-neutral-100 text-neutral-800 self-start">
-                {journeys.length} Direct {journeys.length === 1 ? 'Option' : 'Options'}
-              </span>
+              {/* View Mode Switcher and Counts */}
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-neutral-100 text-neutral-800">
+                  {totalDirectRoutes} {totalDirectRoutes === 1 ? 'Route' : 'Routes'} · {totalDirectTrips} Scheduled {totalDirectTrips === 1 ? 'Trip' : 'Trips'}
+                </span>
+
+                {totalDirectRoutes > 0 && (
+                  <div className="hidden sm:inline-flex items-center p-0.5 bg-neutral-100 rounded-full text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('grouped')}
+                      className={`px-3 py-1 rounded-full cursor-pointer transition ${
+                        viewMode === 'grouped'
+                          ? 'bg-white text-black shadow-2xs'
+                          : 'text-neutral-500 hover:text-black'
+                      }`}
+                    >
+                      By Route
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('chronological')}
+                      className={`px-3 py-1 rounded-full cursor-pointer transition ${
+                        viewMode === 'chronological'
+                          ? 'bg-white text-black shadow-2xs'
+                          : 'text-neutral-500 hover:text-black'
+                      }`}
+                    >
+                      All Departures
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Results Grid */}
-            {journeys.length > 0 ? (
-              <div className="mt-4 space-y-4">
-                {journeys.map((j, idx) => {
-                  const isMetro = j.route.route_type === 1 || j.route.agency_id === 'CMRL';
-                  return (
-                    <div
-                      key={`${j.trip_id}-${idx}`}
-                      className="p-5 sm:p-6 rounded-2xl border border-black/10 bg-white hover:border-black/25 transition-all shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6"
-                    >
-                      <div className="space-y-3">
-                        {/* Header Badge Row */}
-                        <div className="flex flex-wrap items-center gap-2">
-                          {idx === 0 && j.is_upcoming && (
-                            <span className="text-[10px] font-black uppercase tracking-wider bg-black text-white px-2.5 py-0.5 rounded-full">
-                              NEXT DEPARTURE
-                            </span>
-                          )}
-                          <span className="text-lg font-black text-neutral-900">
-                            {j.route.route_short_name || j.route.route_id}
-                          </span>
-                          <span
-                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                              isMetro ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-white'
-                            }`}
-                          >
-                            {isMetro ? 'Metro' : 'MTC Bus'}
-                          </span>
-                          {j.direction_id !== null && (
-                            <span className="text-[10px] font-semibold text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-full">
-                              Direction {j.direction_id === 0 ? 'Outbound' : 'Inbound'}
-                            </span>
-                          )}
-                          {j.is_upcoming ? (
-                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                              {j.departs_in_minutes === 0 ? 'Departs now' : `In ${j.departs_in_minutes} min`}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] font-medium text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-full">
-                              Departed earlier today
-                            </span>
-                          )}
-                        </div>
+            {/* Results Display */}
+            {totalDirectRoutes > 0 ? (
+              viewMode === 'grouped' ? (
+                /* GROUPED BY ROUTE VIEW */
+                <div className="mt-4 space-y-5">
+                  {groupedJourneys.map((group) => {
+                    const isMetro = group.route.route_type === 1 || group.route.agency_id === 'CMRL';
+                    const allTrips = group.allTripsToday || group.trips || [];
+                    const nextTrip = group.nextScheduledDeparture || group.nextTrip || allTrips[0] || null;
+                    const subsequentTrips = group.subsequentDepartures || group.subsequentTrips || [];
+                    const isExpanded = !!expandedRoutes[group.route.route_id];
 
-                        {/* Origin -> Destination Route Long Name */}
-                        <div className="text-xs sm:text-sm font-semibold text-neutral-800">
-                          {j.from_stop.stop_name} → {j.to_stop.stop_name}
-                        </div>
-                        <div className="text-[11px] text-neutral-500 line-clamp-1">
-                          Corridor: {j.route.route_long_name}
-                        </div>
+                    return (
+                      <div
+                        key={group.route.route_id}
+                        className="rounded-3xl border border-black/10 bg-white p-6 shadow-xs hover:border-black/20 transition"
+                      >
+                        {/* Route Banner Header */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-neutral-100">
+                          <div className="flex items-start gap-3.5">
+                            <div className="w-12 h-12 rounded-2xl bg-black text-white flex items-center justify-center shrink-0 shadow-2xs">
+                              {isMetro ? <Train className="w-6 h-6" /> : <Bus className="w-6 h-6" />}
+                            </div>
 
-                        {/* Schedule Metric Columns */}
-                        <div className="grid grid-cols-3 gap-4 pt-1 text-xs">
-                          <div>
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
-                              Departure Stop &amp; Time
-                            </span>
-                            <span className="font-bold text-neutral-900 font-mono text-sm block">
-                              {formatTimeTo12Hour(j.departure_time)}
-                            </span>
-                            <span className="text-[10px] text-neutral-500 truncate block">
-                              {j.from_stop.stop_name}
-                            </span>
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-2xl font-black text-neutral-900 tracking-tight">
+                                  {group.route.route_short_name || group.route.route_id}
+                                </span>
+                                <span
+                                  className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${
+                                    isMetro ? 'bg-blue-600 text-white' : 'bg-neutral-900 text-white'
+                                  }`}
+                                >
+                                  {isMetro ? 'Chennai Metro' : 'MTC Bus'}
+                                </span>
+                                <span className="text-[10px] font-semibold text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-full font-mono">
+                                  Route ID: {group.route.route_id}
+                                </span>
+                              </div>
+
+                              <p className="text-xs text-neutral-600 font-medium mt-1">
+                                {group.route.route_long_name}
+                              </p>
+                            </div>
                           </div>
 
-                          <div>
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
-                              Destination &amp; Arrival
-                            </span>
-                            <span className="font-bold text-neutral-900 font-mono text-sm block">
-                              {formatTimeTo12Hour(j.arrival_time)}
-                            </span>
-                            <span className="text-[10px] text-neutral-500 truncate block">
-                              {j.to_stop.stop_name}
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
-                              Duration &amp; Stops
-                            </span>
-                            <span className="font-bold text-neutral-900 text-sm block">
-                              {j.duration_minutes} min
-                            </span>
-                            <span className="text-[10px] text-neutral-500 block">
-                              {j.stops_count} stops
-                            </span>
+                          <div className="flex items-center gap-2 self-start md:self-auto">
+                            {onSelectRoute && (
+                              <button
+                                onClick={() => onSelectRoute(group.route.route_id)}
+                                className="text-xs font-bold text-neutral-600 hover:text-black border border-neutral-200 hover:border-black/30 rounded-full px-3.5 py-1.5 transition cursor-pointer"
+                              >
+                                View Timetable
+                              </button>
+                            )}
                           </div>
                         </div>
-                      </div>
 
-                      {/* Actions */}
-                      <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 pt-2 md:pt-0 border-t sm:border-t-0 border-neutral-100">
-                        <button
-                          onClick={() => handleViewJourney(j)}
-                          className="rounded-full bg-black hover:bg-neutral-800 text-white font-bold text-xs px-5 py-2.5 transition shadow-xs flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <span>View Journey</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
+                        {/* Next Scheduled Departure Highlight */}
+                        <div className="py-5 grid grid-cols-1 md:grid-cols-3 gap-5 items-center">
+                          {/* Next Bus Card */}
+                          <div className="md:col-span-1 p-4 rounded-2xl bg-neutral-50 border border-neutral-200/80">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                                Next Scheduled Departure
+                              </span>
+                              {nextTrip && nextTrip.is_upcoming && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                                  {nextTrip.departs_in_minutes === 0 ? 'Now' : `In ${nextTrip.departs_in_minutes} min`}
+                                </span>
+                              )}
+                            </div>
 
-                        {onSelectRoute && (
-                          <button
-                            onClick={() => onSelectRoute(j.route.route_id)}
-                            className="text-[11px] font-semibold text-neutral-500 hover:text-black underline cursor-pointer"
-                          >
-                            Route Details
-                          </button>
+                            {nextTrip ? (
+                              <div>
+                                <div className="text-2xl font-black text-neutral-900 font-mono">
+                                  {formatTimeTo12Hour(nextTrip.departure_time)}
+                                </div>
+                                <div className="text-xs text-neutral-500 mt-1 flex items-center justify-between">
+                                  <span>Arrives at {formatTimeTo12Hour(nextTrip.arrival_time)}</span>
+                                  <span className="font-semibold text-neutral-700">{nextTrip.duration_minutes} min</span>
+                                </div>
+                                <div className="mt-3">
+                                  <button
+                                    onClick={() => handleViewJourney(nextTrip)}
+                                    className="w-full rounded-xl bg-black hover:bg-neutral-800 text-white font-bold text-xs py-2.5 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                                  >
+                                    <span>View Stop Sequence</span>
+                                    <ArrowRight className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-neutral-500 mt-1">
+                                No scheduled trips remaining today
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Subsequent Departures Pills */}
+                          <div className="md:col-span-2 space-y-2.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold uppercase tracking-wider text-neutral-500">
+                                Subsequent Scheduled Departures Today ({allTrips.length} Total)
+                              </span>
+
+                              <button
+                                type="button"
+                                onClick={() => toggleRouteExpand(group.route.route_id)}
+                                className="text-xs font-bold text-neutral-700 hover:text-black flex items-center gap-1 cursor-pointer"
+                              >
+                                <span>{isExpanded ? 'Hide Schedule' : 'Show All'}</span>
+                                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              {subsequentTrips.slice(0, 8).map((trip) => (
+                                <button
+                                  key={trip.trip_id}
+                                  onClick={() => handleViewJourney(trip)}
+                                  className="px-3 py-1.5 rounded-full text-xs font-mono font-bold bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-200/80 transition cursor-pointer"
+                                  title={`Departure at ${formatTimeTo12Hour(trip.departure_time)} - Click for stop sequence`}
+                                >
+                                  {formatTimeTo12Hour(trip.departure_time)}
+                                </button>
+                              ))}
+
+                              {subsequentTrips.length === 0 && (
+                                <span className="text-xs text-neutral-400">
+                                  This is the final scheduled departure for today.
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Expandable Full Route Timetable for Selected Route */}
+                        {isExpanded && (
+                          <div className="mt-4 pt-4 border-t border-neutral-100 animate-in fade-in duration-150">
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-3">
+                              All {allTrips.length} Scheduled Trips Between These Stops
+                            </h4>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-64 overflow-y-auto pr-1">
+                              {allTrips.map((trip, tIdx) => (
+                                <div
+                                  key={trip.trip_id}
+                                  onClick={() => handleViewJourney(trip)}
+                                  className="p-3 rounded-xl bg-neutral-50 hover:bg-neutral-100 border border-neutral-200/80 flex items-center justify-between cursor-pointer transition text-xs"
+                                >
+                                  <div>
+                                    <span className="font-mono font-bold text-neutral-900">
+                                      {formatTimeTo12Hour(trip.departure_time)}
+                                    </span>
+                                    <span className="text-neutral-400 mx-1.5">→</span>
+                                    <span className="font-mono text-neutral-600">
+                                      {formatTimeTo12Hour(trip.arrival_time)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[10px] text-neutral-500 font-semibold">
+                                      {trip.duration_minutes}m
+                                    </span>
+                                    <ChevronRight className="w-3.5 h-3.5 text-neutral-400" />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
                         )}
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* ALL DEPARTURES CHRONOLOGICAL VIEW */
+                <div className="mt-4 space-y-3">
+                  {flatJourneys && flatJourneys.map((j, idx) => {
+                    const isMetro = j.route.route_type === 1 || j.route.agency_id === 'CMRL';
+                    return (
+                      <div
+                        key={`${j.trip_id}-${idx}`}
+                        className="p-4 sm:p-5 rounded-2xl border border-black/10 bg-white hover:border-black/25 transition-all shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-4"
+                      >
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {idx === 0 && j.is_upcoming && (
+                              <span className="text-[9px] font-black uppercase tracking-wider bg-black text-white px-2 py-0.5 rounded-full">
+                                NEXT UP
+                              </span>
+                            )}
+                            <span className="text-lg font-black text-neutral-900">
+                              {j.route.route_short_name || j.route.route_id}
+                            </span>
+                            <span
+                              className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                isMetro ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-white'
+                              }`}
+                            >
+                              {isMetro ? 'Metro' : 'MTC Bus'}
+                            </span>
+                            {j.is_upcoming ? (
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                                {j.departs_in_minutes === 0 ? 'Departs now' : `In ${j.departs_in_minutes} min`}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-medium text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-full">
+                                Departed
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-xs text-neutral-600 font-medium line-clamp-1">
+                            {j.route.route_long_name}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between md:justify-end gap-6 text-xs">
+                          <div>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
+                              Departs
+                            </span>
+                            <span className="font-mono font-bold text-sm text-neutral-900">
+                              {formatTimeTo12Hour(j.departure_time)}
+                            </span>
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
+                              Arrives
+                            </span>
+                            <span className="font-mono font-bold text-sm text-neutral-900">
+                              {formatTimeTo12Hour(j.arrival_time)}
+                            </span>
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
+                              Duration
+                            </span>
+                            <span className="font-bold text-neutral-900">
+                              {j.duration_minutes} min
+                            </span>
+                          </div>
+
+                          <button
+                            onClick={() => handleViewJourney(j)}
+                            className="rounded-full bg-black hover:bg-neutral-800 text-white font-bold text-xs px-4 py-2 transition shadow-xs flex items-center gap-1 cursor-pointer"
+                          >
+                            <span>Stops</span>
+                            <ArrowRight className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
             ) : (
-              <div className="rounded-2xl border border-dashed border-neutral-300 p-8 text-center mt-4">
-                <p className="text-sm font-semibold text-neutral-700">
-                  No direct scheduled journeys found between these two stops.
+              /* No Direct Journeys Found Empty State */
+              <div className="rounded-3xl border border-dashed border-neutral-300 p-8 sm:p-12 text-center mt-4 bg-neutral-50/50">
+                <div className="w-12 h-12 rounded-2xl bg-neutral-200 text-neutral-600 flex items-center justify-center mx-auto mb-3">
+                  <Bus className="w-6 h-6" />
+                </div>
+                <h4 className="text-base font-bold text-neutral-900">
+                  No Direct Scheduled Services Found
+                </h4>
+                <p className="text-xs text-neutral-600 max-w-md mx-auto mt-1.5 leading-relaxed">
+                  No direct MTC bus routes or Metro corridors currently serve both selected stops on a single continuous trip in the GTFS database.
                 </p>
-                <p className="text-xs text-neutral-500 mt-1">
-                  Try searching for major interchange terminals such as Broadway, Central, Koyambedu, or T. Nagar.
-                </p>
+                <div className="mt-4 p-3.5 rounded-2xl bg-white border border-neutral-200 max-w-md mx-auto text-xs text-neutral-500 text-left">
+                  <strong className="text-neutral-800 block mb-1">Transit Commuter Tips:</strong>
+                  <ul className="list-disc list-inside space-y-1">
+                    <li>Try selecting a major junction (e.g. Guindy, Saidapet, T. Nagar, Central).</li>
+                    <li>Verify stop directionality or try swapping Origin and Destination.</li>
+                    <li>Browse full corridor lists on the Routes tab.</li>
+                  </ul>
+                </div>
               </div>
             )}
           </div>
@@ -548,20 +809,20 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
       </div>
 
       {/* ─────────────────────────────────────────────────────────────
-          COMPLETE JOURNEY MODAL (Requirement #10)
+          COMPLETE JOURNEY MODAL
           ───────────────────────────────────────────────────────────── */}
       {activeModalTrip && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/40 backdrop-blur-sm animate-in fade-in duration-150">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="relative w-full max-w-2xl max-h-[85vh] bg-white rounded-3xl shadow-2xl border border-neutral-200 overflow-hidden flex flex-col font-sans">
             {/* Modal Header */}
             <div className="p-6 border-b border-neutral-100 flex items-center justify-between shrink-0 bg-neutral-50/50">
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-black text-white">
-                    {completeJourney?.route.route_short_name || 'Direct Bus'}
+                    {completeJourney?.route.route_short_name || 'Direct Service'}
                   </span>
                   <span className="text-xs text-neutral-500 font-mono">
-                    Trip #{completeJourney?.trip.trip_id}
+                    Trip #{activeModalTrip.tripId}
                   </span>
                 </div>
                 <h3 className="text-xl font-black text-neutral-900 mt-1">
@@ -670,7 +931,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                               <div className="text-[10px] text-neutral-400 font-mono">
                                 Stop ID: {step.stop_id}
                                 {step.stop_lat && step.stop_lon && (
-                                  <span> · ({step.stop_lat.toFixed(4)}, {step.stop_lon.toFixed(4)})</span>
+                                  <span> · ({Number(step.stop_lat).toFixed(4)}, {Number(step.stop_lon).toFixed(4)})</span>
                                 )}
                               </div>
                             </div>

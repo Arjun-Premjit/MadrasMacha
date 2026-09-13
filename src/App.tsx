@@ -116,6 +116,7 @@ export default function App() {
           <MetroPage
             routes={routes}
             onSelectRoute={(route) => handleSelectRouteById(route.route_id)}
+            onSelectStop={(stop) => handleSelectStopById(stop.stop_id)}
           />
         )}
 

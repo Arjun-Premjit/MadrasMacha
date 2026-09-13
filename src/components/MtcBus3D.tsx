@@ -3,16 +3,22 @@ import gsap from 'gsap';
 
 interface MtcBus3DProps {
   className?: string;
+  isStatic?: boolean;
+  showWatermark?: boolean;
 }
 
 export const MtcBus3D: React.FC<MtcBus3DProps> = ({
   className = '',
+  isStatic = false,
+  showWatermark = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const busWrapperRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (isStatic) return;
+
     const container = containerRef.current;
     const busWrapper = busWrapperRef.current;
     const shadow = shadowRef.current;
@@ -68,7 +74,7 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
       window.removeEventListener('scroll', handleScroll);
       ambientTween.kill();
     };
-  }, []);
+  }, [isStatic]);
 
   return (
     <div
@@ -78,14 +84,16 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
     >
       <div className="relative w-full max-w-5xl flex items-center justify-center px-4 py-8 overflow-visible">
         {/* Architectural Watermark Behind the Bus */}
-        <div
-          aria-hidden="true"
-          className="absolute top-2 sm:top-5 md:top-6 left-1/2 -translate-x-1/2 z-0 pointer-events-none select-none whitespace-nowrap overflow-visible w-full text-center px-4"
-        >
-          <span className="text-xl sm:text-3xl md:text-5xl lg:text-6xl font-black tracking-tight uppercase text-neutral-900/[0.08] leading-none inline-block">
-            NEXT STOP: MARINA
-          </span>
-        </div>
+        {showWatermark && (
+          <div
+            aria-hidden="true"
+            className="absolute top-2 sm:top-5 md:top-6 left-1/2 -translate-x-1/2 z-0 pointer-events-none select-none whitespace-nowrap overflow-visible w-full text-center px-4"
+          >
+            <span className="text-xl sm:text-3xl md:text-5xl lg:text-6xl font-black tracking-tight uppercase text-neutral-900/[0.08] leading-none inline-block">
+              NEXT STOP: MARINA
+            </span>
+          </div>
+        )}
 
         {/* Ground shadow following left-to-right translation */}
         <div

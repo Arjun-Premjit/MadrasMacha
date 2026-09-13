@@ -53,13 +53,13 @@ export const AboutPage: React.FC = () => {
           </ul>
         </div>
 
-        {/* Paragraph 3: Future Live Telemetry */}
+        {/* Paragraph 3: Static GTFS & Future Live Telemetry */}
         <div className="p-8 rounded-2xl bg-white border border-black/10 shadow-sm">
           <h2 className="text-2xl sm:text-3xl font-bold text-black mb-4">
-            GTFS-Realtime (GTFS-RT).
+            Static GTFS Schedules &amp; Future GTFS-Realtime.
           </h2>
           <p className="text-base text-black/70 leading-relaxed">
-            The platform establishes a strict architectural boundary between static schedule data and live vehicle positions. Upcoming phases will ingest GPS Automatic Vehicle Location (AVL) feeds over Protocol Buffers (protobuf) to report real-time arrival predictions, vehicle crowding, and corridor delay notifications.
+            MadrasMacha currently uses static GTFS schedule data to provide route, stop, trip, and timetable information. The platform establishes a strict architectural boundary between static schedule data and live vehicle positions: live vehicle locations, GPS Automatic Vehicle Location (AVL) feeds, and GTFS-Realtime protocol buffers will be integrated in future phases.
           </p>
         </div>
 

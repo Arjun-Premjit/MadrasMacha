@@ -9,6 +9,8 @@ import { StopDetailPage } from './components/pages/StopDetailPage';
 import { MtcPage } from './components/pages/MtcPage';
 import { MetroPage } from './components/pages/MetroPage';
 import { AboutPage } from './components/pages/AboutPage';
+import { PrivacyPolicyPage } from './components/pages/PrivacyPolicyPage';
+import { TermsPage } from './components/pages/TermsPage';
 import { TestPage } from './components/pages/TestPage';
 import { Footer } from './components/Footer';
 
@@ -69,6 +71,8 @@ export default function App() {
         {currentPage === 'home' && (
           <EditorialHome
             onNavigate={handleNavigate}
+            onSelectRoute={handleSelectRouteById}
+            onSelectStop={handleSelectStopById}
           />
         )}
 
@@ -117,6 +121,14 @@ export default function App() {
 
         {currentPage === 'about' && (
           <AboutPage />
+        )}
+
+        {currentPage === 'privacy' && (
+          <PrivacyPolicyPage onBack={() => handleNavigate('home')} />
+        )}
+
+        {currentPage === 'terms' && (
+          <TermsPage onBack={() => handleNavigate('home')} />
         )}
 
         {currentPage === 'test' && (

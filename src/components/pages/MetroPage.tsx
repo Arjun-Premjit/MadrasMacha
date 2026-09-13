@@ -1,167 +1,332 @@
-import React, { useState } from 'react';
-import { Route } from '../../types/transit';
+import React, { useState, useEffect } from 'react';
+import { Route, Stop } from '../../types/transit';
 import { MetroTrain3D } from '../MetroTrain3D';
-import { Train, ArrowRight } from 'lucide-react';
+import { supabase } from '../../lib/supabase';
+import {
+  Train,
+  ArrowRight,
+  Info,
+  MapPin,
+  Loader2,
+  AlertCircle,
+  ExternalLink,
+  ShieldCheck,
+} from 'lucide-react';
 
 interface MetroPageProps {
-  routes: Route[];
+  routes?: Route[];
   onSelectRoute: (route: Route) => void;
 }
 
-export const MetroPage: React.FC<MetroPageProps> = ({
-  routes,
-  onSelectRoute,
-}) => {
-  const [selectedCorridor, setSelectedCorridor] = useState<'blue' | 'green' | 'inter'>('blue');
+export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute }) => {
+  const [metroRoutes, setMetroRoutes] = useState<Route[]>([]);
+  const [metroStops, setMetroStops] = useState<Stop[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState<string>('CMRL_1');
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const metroRoutes = routes.filter(
-    (r) => r.agency_id === 'CMRL' || r.route_type === 1
-  );
+  useEffect(() => {
+    async function loadMetroData() {
+      setLoading(true);
+      setError(null);
+      try {
+        // Fetch actual Metro routes from Supabase
+        const { data: routesData, error: routesErr } = await supabase
+          .from('routes')
+          .select('*')
+          .eq('agency_id', 'CMRL')
+          .order('route_id');
 
-  const activeRoute = metroRoutes.find((r) => {
-    if (selectedCorridor === 'blue') return r.route_id === 'CMRL-BLUE';
-    if (selectedCorridor === 'green') return r.route_id === 'CMRL-GREEN';
-    return r.route_id === 'CMRL-INTER';
-  }) || metroRoutes[0];
+        if (routesErr) throw routesErr;
+        setMetroRoutes(routesData || []);
+
+        // Fetch actual CMRL Metro stops from Supabase
+        const { data: stopsData, error: stopsErr } = await supabase
+          .from('stops')
+          .select('*')
+          .like('stop_id', 'CMRL%')
+          .order('stop_id');
+
+        if (stopsErr) throw stopsErr;
+        setMetroStops(stopsData || []);
+
+        if (routesData && routesData.length > 0) {
+          setSelectedRouteId(routesData[0].route_id);
+        }
+      } catch (err: any) {
+        console.error('Failed to load Metro data from Supabase:', err);
+        setError(err?.message || 'Failed to load Metro data from Supabase');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadMetroData();
+  }, []);
+
+  const activeRoute = metroRoutes.find((r) => r.route_id === selectedRouteId) || metroRoutes[0];
+
+  // Filter stops associated with the selected route
+  // Blue Line: CMRL_01 through CMRL_26
+  // Green Line: CMRL_G01 through CMRL_G18 (plus Central & St Thomas Mount interchanges)
+  const routeStops = metroStops.filter((s) => {
+    if (selectedRouteId === 'CMRL_1') {
+      return !s.stop_id.includes('CMRL_G');
+    }
+    if (selectedRouteId === 'CMRL_2') {
+      return s.stop_id.includes('CMRL_G') || s.stop_id === 'CMRL_14' || s.stop_id === 'CMRL_24';
+    }
+    // Inter-Corridor
+    return true;
+  });
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] text-black pt-28 pb-20 px-6 sm:px-12 max-w-7xl mx-auto font-sans">
+    <div className="min-h-screen bg-[#FAFAFA] text-black pt-28 pb-20 px-6 sm:px-12 max-w-7xl mx-auto font-sans selection:bg-black selection:text-white">
       {/* Header */}
-      <div className="pb-8">
-        <h1 className="text-5xl sm:text-7xl font-bold tracking-tight text-black">
-          Chennai Metro
+      <div className="pb-8 border-b border-black/10">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-black/5 text-xs font-semibold uppercase tracking-wider text-black/70 mb-4">
+          <Train className="w-3.5 h-3.5 text-black" />
+          <span>Chennai Metro Rail Limited (CMRL)</span>
+        </div>
+        <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight text-black">
+          Chennai Metro Rail
         </h1>
-        <p className="mt-3 text-lg text-black/75 max-w-2xl leading-relaxed">
-          State-of-the-art grade-separated rail network operating standard gauge stainless-steel trains with driverless-ready CBTC signaling, connecting northern terminals to the international airport.
+        <p className="mt-3 text-base sm:text-lg text-black/75 max-w-2xl leading-relaxed">
+          The rapid transit rail network connecting Wimco Nagar, Chennai Central, Egmore, Koyambedu, and Chennai International Airport across grade-separated elevated and underground tunnels.
         </p>
 
-        {/* Corridor Buttons */}
-        <div className="mt-8 flex flex-wrap items-center gap-3">
-          <button
-            onClick={() => setSelectedCorridor('blue')}
-            className={`rounded-full px-6 py-3 text-sm font-semibold transition-all cursor-pointer ${
-              selectedCorridor === 'blue'
-                ? 'bg-black text-white shadow-md'
-                : 'bg-white text-black hover:bg-neutral-100 border border-black/10'
-            }`}
-          >
-            Blue Line (Corridor 1)
-          </button>
-          <button
-            onClick={() => setSelectedCorridor('green')}
-            className={`rounded-full px-6 py-3 text-sm font-semibold transition-all cursor-pointer ${
-              selectedCorridor === 'green'
-                ? 'bg-black text-white shadow-md'
-                : 'bg-white text-black hover:bg-neutral-100 border border-black/10'
-            }`}
-          >
-            Green Line (Corridor 2)
-          </button>
-          <button
-            onClick={() => setSelectedCorridor('inter')}
-            className={`rounded-full px-6 py-3 text-sm font-semibold transition-all cursor-pointer ${
-              selectedCorridor === 'inter'
-                ? 'bg-black text-white shadow-md'
-                : 'bg-white text-black hover:bg-neutral-100 border border-black/10'
-            }`}
-          >
-            Inter-Corridor Loop
-          </button>
+        {/* Dynamic Route Switcher Tabs from Supabase */}
+        {metroRoutes.length > 0 && (
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            {metroRoutes.map((route) => {
+              const isSelected = route.route_id === selectedRouteId;
+              const isBlue = route.route_short_name.toLowerCase().includes('blue');
+              const isGreen = route.route_short_name.toLowerCase().includes('green');
+
+              return (
+                <button
+                  key={route.route_id}
+                  onClick={() => setSelectedRouteId(route.route_id)}
+                  className={`rounded-full px-6 py-3 text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center gap-2.5 ${
+                    isSelected
+                      ? 'bg-black text-white shadow-md'
+                      : 'bg-white text-black hover:bg-neutral-100 border border-black/10'
+                  }`}
+                >
+                  <span
+                    className={`w-2.5 h-2.5 rounded-full ${
+                      isBlue ? 'bg-blue-500' : isGreen ? 'bg-emerald-500' : 'bg-neutral-500'
+                    }`}
+                  />
+                  <span>{route.route_short_name}</span>
+                  <span className="text-[10px] opacity-70 font-mono">({route.route_id})</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Static Metro Train Visual (No Watermark, No Animations) */}
+      <div className="my-8 py-4 bg-white rounded-3xl border border-black/10 p-6 sm:p-10 shadow-xs flex flex-col items-center justify-center">
+        {/* Kept STATIC with no animations and no watermark */}
+        <MetroTrain3D isStatic={true} showWatermark={false} className="w-full max-w-4xl mx-auto" />
+      </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="mb-6 p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 shrink-0" />
+          <span>{error}</span>
         </div>
-      </div>
+      )}
 
-      {/* Train Along Viaduct */}
-      <div className="my-8 py-4">
-        <MetroTrain3D className="w-full max-w-4xl mx-auto" />
-      </div>
-
-      {/* Corridor Details & Stations */}
-      {activeRoute && (
+      {/* Loading State */}
+      {loading ? (
+        <div className="p-16 rounded-3xl bg-white border border-neutral-200 text-center flex flex-col items-center justify-center space-y-3">
+          <Loader2 className="w-8 h-8 animate-spin text-neutral-400" />
+          <p className="text-sm font-semibold text-neutral-700">Loading Metro corridors from Supabase...</p>
+        </div>
+      ) : activeRoute ? (
+        /* Corridor Details & Stations */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 pt-4">
-          {/* Left Column: Corridor Specs */}
+          {/* Left Column: Corridor Specs from Supabase */}
           <div className="lg:col-span-5 space-y-6">
-            <div className="p-6 rounded-2xl bg-white border border-black/10 shadow-sm">
-              <h2 className="text-2xl sm:text-3xl font-bold text-black">
-                {activeRoute.route_long_name}
-              </h2>
-              <p className="text-base text-black/70 mt-3 leading-relaxed">
-                {activeRoute.route_desc}
-              </p>
+            <div className="p-6 sm:p-8 rounded-3xl bg-white border border-black/10 shadow-xs space-y-6">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-neutral-400">
+                    Route {activeRoute.route_id}
+                  </span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                    GTFS Route Type 1 (Metro)
+                  </span>
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-black text-black leading-snug">
+                  {activeRoute.route_long_name}
+                </h2>
+              </div>
 
-              <div className="grid grid-cols-2 gap-6 pt-6 mt-6 text-sm">
-                <div>
-                  <span className="font-semibold text-black/60 block uppercase">Peak Headway</span>
-                  <span className="text-black font-bold text-base mt-1 block">{activeRoute.frequency_peak || '4 min'}</span>
+              {/* Data Notice for Metro Dataset */}
+              <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200/80 text-xs text-neutral-600 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-neutral-900">
+                  <Info className="w-4 h-4 text-neutral-700 shrink-0" />
+                  <span>GTFS Schedule Scope Notice</span>
                 </div>
-                <div>
-                  <span className="font-semibold text-black/60 block uppercase">Corridor Length</span>
-                  <span className="text-black font-bold text-base mt-1 block">{activeRoute.distance_km || '32.1'} km</span>
+                <p className="leading-relaxed">
+                  The static GTFS dataset records published terminal endpoints for CMRL services.
+                </p>
+                <p className="font-semibold text-neutral-800">
+                  Intermediate stop timetable intervals: <span className="text-neutral-500 font-normal">Information unavailable in the current GTFS dataset.</span>
+                </p>
+              </div>
+
+              {/* Route Attributes */}
+              <div className="grid grid-cols-2 gap-4 pt-2 text-xs">
+                <div className="p-3.5 rounded-2xl bg-neutral-50 border border-black/5">
+                  <span className="font-bold text-neutral-400 uppercase tracking-wider block text-[10px]">
+                    Operating Agency
+                  </span>
+                  <span className="text-neutral-900 font-semibold text-sm mt-1 block">
+                    Chennai Metro Rail Ltd
+                  </span>
+                  <span className="text-[10px] text-neutral-400 font-mono">Agency ID: CMRL</span>
                 </div>
-                <div>
-                  <span className="font-semibold text-black/60 block uppercase">Service Hours</span>
-                  <span className="text-black font-bold text-base mt-1 block">05:00 AM – 11:00 PM</span>
-                </div>
-                <div>
-                  <span className="font-semibold text-black/60 block uppercase">Fare Structure</span>
-                  <span className="text-black font-bold text-base mt-1 block">₹{activeRoute.fare_min || 10} – ₹{activeRoute.fare_max || 50}</span>
+
+                <div className="p-3.5 rounded-2xl bg-neutral-50 border border-black/5">
+                  <span className="font-bold text-neutral-400 uppercase tracking-wider block text-[10px]">
+                    Transit Mode
+                  </span>
+                  <span className="text-neutral-900 font-semibold text-sm mt-1 block">
+                    Grade-Separated Rail
+                  </span>
+                  <span className="text-[10px] text-neutral-400 font-mono">Standard Gauge</span>
                 </div>
               </div>
 
-              <div className="pt-6">
+              {/* View Full Route Timetable Button */}
+              <div className="pt-2">
                 <button
                   onClick={() => onSelectRoute(activeRoute)}
-                  className="rounded-full bg-black hover:bg-neutral-800 text-white font-medium text-sm px-6 py-3 transition-all hover:scale-105 flex items-center gap-2 cursor-pointer shadow-md"
+                  className="w-full rounded-full bg-black hover:bg-neutral-800 text-white font-bold text-sm px-6 py-3.5 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
                 >
-                  <span>View corridor timetable</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <span>View Route Details &amp; Scheduled Trips</span>
+                  <ArrowRight className="w-4 h-4 text-white" />
                 </button>
               </div>
             </div>
-          </div>
 
-          {/* Right Column: Station Sequence */}
-          <div className="lg:col-span-7">
-            <h3 className="text-xl font-bold text-black mb-4">
-              Stations &amp; Interchanges ({activeRoute.stops_sequence?.length || 0})
-            </h3>
-
-            <div className="space-y-2">
-              {activeRoute.stops_sequence?.map((stationName, idx) => {
-                const isInterchange =
-                  stationName.includes('Central') ||
-                  stationName.includes('Alandur') ||
-                  stationName.includes('Airport');
-
-                return (
-                  <div
-                    key={idx}
-                    className="flex items-center justify-between p-4 rounded-xl bg-white border border-black/5 hover:border-black/20 text-sm transition-all shadow-xs"
-                  >
-                    <div className="flex items-center gap-4">
-                      <span className="font-bold text-black/50 w-8">
-                        {idx + 1 < 10 ? `0${idx + 1}` : idx + 1}
-                      </span>
-                      <span
-                        className={`text-base ${
-                          isInterchange ? 'font-bold text-black' : 'font-medium text-black/80'
-                        }`}
-                      >
-                        {stationName}
-                      </span>
-                    </div>
-
-                    {isInterchange && (
-                      <span className="text-xs font-semibold uppercase tracking-wider text-white bg-black rounded-full px-3 py-1">
-                        Interchange
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
+            {/* Official Authority Card */}
+            <div className="p-6 rounded-3xl bg-white border border-black/10 shadow-xs">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-3">
+                Official Agency Portal
+              </h4>
+              <p className="text-xs text-neutral-600 leading-relaxed mb-4">
+                For live ticketing, smart card recharge, and official station announcements, visit the official Chennai Metro Rail Limited portal.
+              </p>
+              <a
+                href="https://chennaimetrorail.org"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 text-xs font-bold text-black underline underline-offset-4 hover:opacity-80"
+              >
+                <span>Visit chennaimetrorail.org</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
             </div>
           </div>
+
+          {/* Right Column: Actual Metro Stations from Supabase */}
+          <div className="lg:col-span-7 space-y-4">
+            <div className="flex items-center justify-between pb-2">
+              <div>
+                <h3 className="text-xl font-black text-black">
+                  Corridor Stations &amp; Interchanges
+                </h3>
+                <p className="text-xs text-neutral-500">
+                  {routeStops.length} stations registered in Supabase GTFS database
+                </p>
+              </div>
+
+              <span className="text-xs font-mono font-bold bg-neutral-100 text-neutral-700 px-3 py-1 rounded-full">
+                {routeStops.length} Stops
+              </span>
+            </div>
+
+            {routeStops.length === 0 ? (
+              <div className="p-8 rounded-2xl bg-white border border-neutral-200 text-center text-neutral-500 text-sm">
+                No stations retrieved for this corridor in the database.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {routeStops.map((station, idx) => {
+                  const isTerminal =
+                    idx === 0 || idx === routeStops.length - 1;
+                  const isInterchange =
+                    station.stop_name.toLowerCase().includes('central') ||
+                    station.stop_name.toLowerCase().includes('alandur') ||
+                    station.stop_name.toLowerCase().includes('airport') ||
+                    station.stop_name.toLowerCase().includes('mount');
+
+                  return (
+                    <div
+                      key={station.stop_id}
+                      className={`flex items-center justify-between p-4 rounded-2xl bg-white border transition-all shadow-2xs ${
+                        isTerminal
+                          ? 'border-black/20 bg-neutral-50/50'
+                          : 'border-black/5 hover:border-black/20'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <div
+                          className={`w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-bold shrink-0 ${
+                            isTerminal
+                              ? 'bg-black text-white'
+                              : 'bg-neutral-100 text-neutral-700'
+                          }`}
+                        >
+                          {idx + 1}
+                        </div>
+
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-bold text-neutral-900">
+                              {station.stop_name}
+                            </span>
+                            {isTerminal && (
+                              <span className="text-[9px] font-bold uppercase tracking-wider bg-black text-white px-2 py-0.5 rounded-full">
+                                Terminal
+                              </span>
+                            )}
+                            {isInterchange && !isTerminal && (
+                              <span className="text-[9px] font-bold uppercase tracking-wider bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded-full">
+                                Interchange
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-[11px] text-neutral-400 font-mono mt-0.5 flex items-center gap-2">
+                            <span>ID: {station.stop_id}</span>
+                            {station.stop_lat && station.stop_lon && (
+                              <span>· {Number(station.stop_lat).toFixed(4)}° N, {Number(station.stop_lon).toFixed(4)}° E</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <span className="text-[11px] font-medium text-neutral-400">
+                          {isTerminal ? 'Scheduled Terminus' : 'Active Station'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

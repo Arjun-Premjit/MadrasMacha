@@ -4,13 +4,18 @@ import { MetroTrain3D } from './MetroTrain3D';
 import { PageView } from './Header';
 import { ArrowRight, Bus, Train } from 'lucide-react';
 import { Footer } from './Footer';
+import { JourneyPlanner } from './JourneyPlanner';
 
 interface EditorialHomeProps {
   onNavigate: (page: PageView) => void;
+  onSelectRoute?: (routeId: string) => void;
+  onSelectStop?: (stopId: string) => void;
 }
 
 export const EditorialHome: React.FC<EditorialHomeProps> = ({
   onNavigate,
+  onSelectRoute,
+  onSelectStop,
 }) => {
   return (
     <div className="relative w-full bg-[#FAFAFA] text-black overflow-x-hidden font-sans">
@@ -22,6 +27,19 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
         <h1 className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-black tracking-tight text-black select-none">
           Madras Macha
         </h1>
+        <p className="mt-3 max-w-xl text-sm sm:text-base text-black/60 font-medium">
+          Unified public transportation discovery for Chennai MTC buses, Suburban corridors, and Chennai Metro Rail.
+        </p>
+      </section>
+
+      {/* ─────────────────────────────────────────────────────────────
+          PROMINENT PLAN YOUR JOURNEY ENGINE (Requirement #8)
+          ───────────────────────────────────────────────────────────── */}
+      <section className="py-6 px-6 sm:px-12 max-w-7xl mx-auto">
+        <JourneyPlanner
+          onSelectRoute={onSelectRoute}
+          onSelectStop={onSelectStop}
+        />
       </section>
 
       {/* ─────────────────────────────────────────────────────────────

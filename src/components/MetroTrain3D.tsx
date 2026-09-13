@@ -3,16 +3,22 @@ import gsap from 'gsap';
 
 interface MetroTrain3DProps {
   className?: string;
+  isStatic?: boolean;
+  showWatermark?: boolean;
 }
 
 export const MetroTrain3D: React.FC<MetroTrain3DProps> = ({
   className = '',
+  isStatic = false,
+  showWatermark = true,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const trainWrapperRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (isStatic) return;
+
     const container = containerRef.current;
     const trainWrapper = trainWrapperRef.current;
     const shadow = shadowRef.current;
@@ -66,7 +72,7 @@ export const MetroTrain3D: React.FC<MetroTrain3DProps> = ({
       window.removeEventListener('scroll', handleScroll);
       ambientTween.kill();
     };
-  }, []);
+  }, [isStatic]);
 
   return (
     <div
@@ -84,20 +90,22 @@ export const MetroTrain3D: React.FC<MetroTrain3DProps> = ({
 
         {/* Train image with synchronized architectural watermark */}
         <div ref={trainWrapperRef} className="relative z-10 will-change-transform flex items-center justify-center">
-          {/* Watermark aligned along carriage tracks starting near the big passenger window */}
-          <div
-            aria-hidden="true"
-            className="absolute -left-4 sm:-left-8 md:-left-14 bottom-4 sm:bottom-8 md:bottom-12 z-0 pointer-events-none select-none whitespace-nowrap -rotate-[27deg] origin-bottom-left"
-          >
-            <div className="flex flex-col items-start leading-[0.88] uppercase font-black text-neutral-900/[0.12]">
-              <span className="text-base sm:text-2xl md:text-3xl lg:text-4xl tracking-tight text-neutral-900/[0.11]">
-                NEXT STOP:
-              </span>
-              <span className="text-2xl sm:text-4xl md:text-6xl lg:text-7xl xl:text-8xl tracking-tighter mt-0.5 sm:mt-1">
-                CHENNAI CENTRAL
-              </span>
+          {/* Watermark starting near the big passenger window in the carriage */}
+          {showWatermark && (
+            <div
+              aria-hidden="true"
+              className="absolute left-[16%] sm:left-[20%] md:left-[24%] top-[34%] sm:top-[30%] md:top-[28%] z-0 pointer-events-none select-none whitespace-nowrap -rotate-[26deg] origin-top-left"
+            >
+              <div className="flex flex-col items-start leading-[0.88] uppercase font-black text-neutral-900/[0.13]">
+                <span className="text-sm sm:text-xl md:text-2xl lg:text-3xl tracking-tight text-neutral-900/[0.12] pl-0.5">
+                  NEXT STOP
+                </span>
+                <span className="text-2xl sm:text-4xl md:text-6xl lg:text-7xl xl:text-8xl tracking-tighter mt-1">
+                  CHENNAI CENTRAL
+                </span>
+              </div>
             </div>
-          </div>
+          )}
 
           <img
             id="metro-train-original-photo"

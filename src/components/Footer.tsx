@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, Linkedin } from 'lucide-react';
 import { PageView } from './Header';
 
 interface FooterProps {
@@ -28,11 +28,33 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
             Left statement + 3 structured link columns
             ───────────────────────────────────────────────────────────── */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-10 sm:gap-12 pb-16">
-          {/* Left Summary Statement */}
-          <div className="md:col-span-4 lg:col-span-5 pr-4">
-            <p className="text-base sm:text-lg text-neutral-800 font-normal leading-relaxed max-w-sm">
-              The public transit directory that connects Chennai. Built for commuters across MTC bus networks and CMRL metro rail corridors.
-            </p>
+          {/* Left Summary Statement & Attribution */}
+          <div className="md:col-span-4 lg:col-span-5 pr-4 flex flex-col justify-between">
+            <div>
+              <p className="text-base sm:text-lg text-neutral-800 font-normal leading-relaxed max-w-sm">
+                The public transit directory that connects Chennai. Built for commuters across MTC bus networks and CMRL metro rail corridors.
+              </p>
+
+              {/* Attribution & LinkedIn Button */}
+              <div className="mt-5 pt-4 border-t border-black/5 space-y-3">
+                <div className="text-xs font-medium text-neutral-600 tracking-wide">
+                  Built by: <span className="font-semibold text-neutral-900">Arjun Premjit</span>
+                </div>
+
+                <div>
+                  <a
+                    href="https://www.linkedin.com/in/arjun-premjit-097a89386"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/60 hover:bg-white/90 backdrop-blur-md border border-neutral-300/70 hover:border-neutral-400 text-xs font-medium text-neutral-800 hover:text-neutral-950 transition-all duration-150 shadow-2xs group cursor-pointer"
+                  >
+                    <Linkedin className="w-3.5 h-3.5 text-[#0A66C2] fill-[#0A66C2] shrink-0" />
+                    <span>Connect on LinkedIn</span>
+                    <ExternalLink className="w-3 h-3 text-neutral-400 group-hover:text-neutral-600 ml-0.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Right Columns (3 columns matching the reference model) */}
@@ -202,13 +224,13 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         <div className="pt-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-neutral-500">
           <div className="flex items-center gap-6">
             <button
-              onClick={() => onNavigate?.('about')}
+              onClick={() => onNavigate?.('privacy')}
               className="underline underline-offset-4 hover:text-black transition-colors cursor-pointer"
             >
               Transit Privacy Policy
             </button>
             <button
-              onClick={() => onNavigate?.('about')}
+              onClick={() => onNavigate?.('terms')}
               className="underline underline-offset-4 hover:text-black transition-colors cursor-pointer"
             >
               Terms of Service

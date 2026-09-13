@@ -14,7 +14,7 @@ import {
 import { Route } from '../types/transit';
 import { searchTransitViaRest, TransitSearchResult } from '../../lib/supabase/api';
 
-export type PageView = 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'about' | 'test';
+export type PageView = 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'about' | 'privacy' | 'terms' | 'test';
 
 interface HeaderProps {
   currentPage: PageView;

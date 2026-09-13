@@ -1,0 +1,6 @@
+{
+  "name": "MadrasMacha",
+  "description": "Chennai public transportation platform for MTC buses, Chennai Metro routes, stops, and schedule discovery with Google Maps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

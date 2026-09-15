@@ -14,6 +14,7 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const busWrapperRef = useRef<HTMLDivElement>(null);
+  const busInnerRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,6 +22,7 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
 
     const container = containerRef.current;
     const busWrapper = busWrapperRef.current;
+    const busInner = busInnerRef.current;
     const shadow = shadowRef.current;
 
     if (!container || !busWrapper) return;
@@ -39,8 +41,6 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
       const clamped = Math.max(-1.5, Math.min(1.5, progress));
 
       // Translate from Left to Right as the page scrolls down
-      // When entering from bottom, clamped is negative (positioned more to the left)
-      // As user scrolls down, clamped becomes positive (moves towards the right)
       const targetX = clamped * 90;
 
       gsap.to(busWrapper, {
@@ -61,18 +61,22 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
     window.addEventListener('scroll', handleScroll, { passive: true });
     handleScroll();
 
-    // Ambient forward cruising motion from left to right
-    const ambientTween = gsap.to(busWrapper, {
-      x: '+=12',
-      duration: 3,
-      repeat: -1,
-      yoyo: true,
-      ease: 'sine.inOut',
-    });
+    // Ambient cruising motion on the inner wrapper (won't conflict with scroll tween)
+    let ambientTween: gsap.core.Tween | null = null;
+    if (busInner) {
+      ambientTween = gsap.to(busInner, {
+        x: 12,
+        y: -3,
+        duration: 2.8,
+        repeat: -1,
+        yoyo: true,
+        ease: 'sine.inOut',
+      });
+    }
 
     return () => {
       window.removeEventListener('scroll', handleScroll);
-      ambientTween.kill();
+      ambientTween?.kill();
     };
   }, [isStatic]);
 
@@ -80,16 +84,16 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
     <div
       ref={containerRef}
       id="mtc-bus-photo-container"
-      className={`relative select-none w-full flex flex-col items-center justify-center overflow-hidden ${className}`}
+      className={`relative select-none w-full flex flex-col items-center justify-center overflow-visible ${className}`}
     >
-      <div className="relative w-full max-w-5xl flex items-center justify-center px-4 py-8 overflow-visible">
-        {/* Decorative Watermark Behind the Bus (Landing Page Only) */}
+      <div className="relative w-full max-w-5xl flex items-center justify-center px-4 pt-8 pb-8 overflow-visible">
+        {/* Decorative Watermark Behind the Bus (Center Aligned, Shifted Higher Above Bus) */}
         {showWatermark && (
           <div
             aria-hidden="true"
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-0 pointer-events-none select-none whitespace-nowrap overflow-visible w-full text-center px-4"
+            className="absolute inset-0 flex items-center justify-center -translate-y-20 sm:-translate-y-28 md:-translate-y-36 lg:-translate-y-44 z-0 pointer-events-none select-none overflow-visible text-center"
           >
-            <span className="text-3xl sm:text-5xl md:text-7xl lg:text-8xl font-black tracking-tight uppercase text-neutral-900/[0.09] leading-none inline-block">
+            <span className="text-3xl sm:text-5xl md:text-7xl lg:text-8xl xl:text-9xl font-black tracking-tight uppercase text-neutral-950/[0.22] leading-none text-center whitespace-nowrap select-none">
               NEXT STOP: MARINA
             </span>
           </div>
@@ -104,14 +108,16 @@ export const MtcBus3D: React.FC<MtcBus3DProps> = ({
 
         {/* Bus image with left-to-right motion */}
         <div ref={busWrapperRef} className="relative z-10 will-change-transform">
-          <img
-            id="mtc-bus-original-photo"
-            src="/assets/mtc_bus.png"
-            alt="MTC Chennai Bus"
-            referrerPolicy="no-referrer"
-            className="max-h-[480px] w-auto max-w-full object-contain drop-shadow-[0_25px_35px_rgba(0,0,0,0.2)]"
-            loading="eager"
-          />
+          <div ref={busInnerRef} className="will-change-transform">
+            <img
+              id="mtc-bus-original-photo"
+              src="/assets/mtc_bus.png"
+              alt="MTC Chennai Bus"
+              referrerPolicy="no-referrer"
+              className="max-h-[480px] w-auto max-w-full object-contain drop-shadow-[0_25px_35px_rgba(0,0,0,0.2)]"
+              loading="eager"
+            />
+          </div>
         </div>
       </div>
     </div>

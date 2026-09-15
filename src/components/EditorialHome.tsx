@@ -76,7 +76,7 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
         {/* Authentic MTC Bus Photo with Decorative Watermark */}
         <div className="w-full my-6 flex justify-center overflow-visible">
           <div className="w-full max-w-5xl">
-            <MtcBus3D isStatic={true} showWatermark={true} className="w-full" />
+            <MtcBus3D isStatic={false} showWatermark={true} className="w-full" />
           </div>
         </div>
       </section>
@@ -115,7 +115,7 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
         {/* Authentic Chennai Metro Photo with Decorative Watermark */}
         <div className="w-full my-6 flex justify-center overflow-visible">
           <div className="w-full max-w-5xl">
-            <MetroTrain3D isStatic={true} showWatermark={true} className="w-full" />
+            <MetroTrain3D isStatic={false} showWatermark={true} className="w-full" />
           </div>
         </div>
       </section>

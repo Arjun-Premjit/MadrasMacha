@@ -2,9 +2,10 @@ import React from 'react';
 import { MtcBus3D } from './MtcBus3D';
 import { MetroTrain3D } from './MetroTrain3D';
 import { PageView } from './Header';
-import { ArrowRight, Bus, Train } from 'lucide-react';
+import { ArrowRight, Bus, Train, Ticket, Radio, Languages } from 'lucide-react';
 import { Footer } from './Footer';
 import { JourneyPlanner } from './JourneyPlanner';
+import { useLanguage } from '../hooks/useLanguage';
 
 interface EditorialHomeProps {
   onNavigate: (page: PageView) => void;
@@ -17,6 +18,8 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
   onSelectRoute,
   onSelectStop,
 }) => {
+  const { language, setLanguage } = useLanguage();
+
   return (
     <div className="relative w-full bg-[#FAFAFA] text-black overflow-x-hidden font-sans">
       {/* ─────────────────────────────────────────────────────────────
@@ -28,8 +31,76 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
           Madras Macha
         </h1>
         <p className="mt-3 max-w-xl text-sm sm:text-base text-black/60 font-medium">
-          Unified public transportation discovery for Chennai MTC buses, Suburban corridors, and Chennai Metro Rail.
+          {language === 'ta'
+            ? 'சென்னை மாநகர பேருந்துகள் (MTC) மற்றும் மெட்ரோ ரயில் பயணங்களுக்கான ஒருங்கிணைந்த வழிகாட்டி.'
+            : 'Unified public transportation discovery for Chennai MTC buses, Suburban corridors, and Chennai Metro Rail.'}
         </p>
+
+        {/* New Production Feature Highlights */}
+        <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-3xl text-left">
+          {/* Feature 1: Bilingual Toggle Card */}
+          <div
+            onClick={() => setLanguage(language === 'en' ? 'ta' : 'en')}
+            className="p-4 rounded-2xl bg-white border border-neutral-200/90 shadow-2xs hover:shadow-sm hover:border-black/20 transition-all cursor-pointer group"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="w-8 h-8 rounded-xl bg-purple-50 text-purple-700 flex items-center justify-center font-bold">
+                <Languages className="w-4 h-4" />
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-700">
+                {language === 'ta' ? 'தமிழ்' : 'English'}
+              </span>
+            </div>
+            <h3 className="text-xs font-bold text-neutral-900 group-hover:text-black">
+              {language === 'ta' ? 'இருமொழி நிலையப் பெயர்கள்' : 'Bilingual Station Names'}
+            </h3>
+            <p className="text-[11px] text-neutral-500 mt-0.5">
+              {language === 'ta' ? 'ஆங்கிலம் / தமிழ் பெயர்களை உடனுக்குடன் மாற்றவும்' : 'Instant Tamil / English stop name toggle'}
+            </p>
+          </div>
+
+          {/* Feature 2: Official Fare Calculator Card */}
+          <div
+            onClick={() => onNavigate('fare')}
+            className="p-4 rounded-2xl bg-white border border-neutral-200/90 shadow-2xs hover:shadow-sm hover:border-black/20 transition-all cursor-pointer group"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="w-8 h-8 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center font-bold">
+                <Ticket className="w-4 h-4" />
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">
+                Official
+              </span>
+            </div>
+            <h3 className="text-xs font-bold text-neutral-900 group-hover:text-black">
+              {language === 'ta' ? 'அதிகாரப்பூர்வ கட்டணக் கால்குலேட்டர்' : 'Official Fare Calculator'}
+            </h3>
+            <p className="text-[11px] text-neutral-500 mt-0.5">
+              {language === 'ta' ? 'மெட்ரோ தொலைவு & MTC நிலை கட்டணங்கள்' : 'CMRL track slabs & MTC stage fares'}
+            </p>
+          </div>
+
+          {/* Feature 3: Live GTFS-RT Tracking Card */}
+          <div
+            onClick={() => onNavigate('routes')}
+            className="p-4 rounded-2xl bg-white border border-neutral-200/90 shadow-2xs hover:shadow-sm hover:border-black/20 transition-all cursor-pointer group"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold">
+                <Radio className="w-4 h-4" />
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                GTFS-RT
+              </span>
+            </div>
+            <h3 className="text-xs font-bold text-neutral-900 group-hover:text-black">
+              {language === 'ta' ? 'நேரடி பேருந்து கண்காணிப்பு' : 'Live GTFS-RT Bus Tracker'}
+            </h3>
+            <p className="text-[11px] text-neutral-500 mt-0.5">
+              {language === 'ta' ? 'CUMTA திறந்தநிலை நேரடி தரவு' : 'Verified CUMTA open realtime feed'}
+            </p>
+          </div>
+        </div>
       </section>
 
       {/* ─────────────────────────────────────────────────────────────

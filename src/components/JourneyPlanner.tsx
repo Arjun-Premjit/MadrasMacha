@@ -3,6 +3,7 @@ import {
   searchStopsForPlanner,
   findTransitJourneys,
   findDirectJourneys,
+  findConnectingJourneys,
   fetchCompleteJourney,
   JourneyMatch,
   GroupedRouteJourney,
@@ -189,23 +190,54 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     setConnectingJourneys(null);
 
     try {
-      const res = await findTransitJourneys(selectedFromStop, selectedToStop);
-      if (res.error) {
-        setSearchError(res.error);
-      } else {
-        setGroupedJourneys(res.groupedJourneys);
-        setFlatJourneys(res.journeys);
-        setMultiLegJourneys(res.multiLegJourneys);
-        setDirectJourneys(res.directJourneys);
-        setConnectingJourneys(res.connectingJourneys);
-        setResolvedFromStop(res.fromStop);
-        setResolvedToStop(res.toStop);
+      // 1. Search for direct journeys first
+      const directRes = await findDirectJourneys(selectedFromStop, selectedToStop);
 
-        // If no direct journeys exist, automatically default to all or connecting
-        if (res.groupedJourneys.length === 0 && res.connectingJourneys.length > 0) {
-          setFilterTab('connecting');
-        } else {
-          setFilterTab('all');
+      // 2. If direct journeys exist, display them immediately
+      const hasDirect =
+        !directRes.error &&
+        ((directRes.groupedJourneys && directRes.groupedJourneys.length > 0) ||
+          (directRes.directJourneys && directRes.directJourneys.length > 0));
+
+      if (hasDirect) {
+        setGroupedJourneys(directRes.groupedJourneys || []);
+        setFlatJourneys(directRes.journeys || []);
+        setDirectJourneys(directRes.directJourneys || []);
+        setMultiLegJourneys(directRes.multiLegJourneys || []);
+        setResolvedFromStop(directRes.fromStop);
+        setResolvedToStop(directRes.toStop);
+        setFilterTab('all');
+      }
+
+      // 3. Independently search for connecting journeys
+      const connectingRes = await findConnectingJourneys(selectedFromStop, selectedToStop);
+
+      const allDirect = directRes.directJourneys || [];
+      const allConnecting = connectingRes.connectingJourneys || [];
+      const mergedMultiLeg = [
+        ...(directRes.multiLegJourneys || []),
+        ...(connectingRes.multiLegJourneys || []),
+      ];
+
+      setDirectJourneys(allDirect);
+      setConnectingJourneys(allConnecting);
+      setMultiLegJourneys(mergedMultiLeg);
+      setGroupedJourneys(directRes.groupedJourneys || []);
+      setFlatJourneys(directRes.journeys || []);
+      if (connectingRes.fromStop) setResolvedFromStop(connectingRes.fromStop);
+      if (connectingRes.toStop) setResolvedToStop(connectingRes.toStop);
+
+      // 4. If connecting journeys exist, display them even when zero direct journeys exist
+      if (allDirect.length === 0 && allConnecting.length > 0) {
+        setFilterTab('connecting');
+      } else if (allDirect.length > 0 && !hasDirect) {
+        setFilterTab('all');
+      }
+
+      // 5. Only display a final "No services found" message if BOTH direct and connecting searches return no valid journey
+      if (allDirect.length === 0 && allConnecting.length === 0) {
+        if (directRes.error && connectingRes.error) {
+          setSearchError(directRes.error || connectingRes.error);
         }
       }
     } catch (err: any) {
@@ -357,11 +389,11 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
               {/* Suggestions Dropdown for FROM */}
               {showFromDropdown && fromSuggestions.length > 0 && (
                 <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-64 overflow-y-auto p-1.5 space-y-1">
-                  {fromSuggestions.map((stop) => {
+                  {fromSuggestions.map((stop, sIdx) => {
                     const isMetro = stop.isMetro ?? Boolean(stop.id && typeof stop.id === 'string' && stop.id.startsWith('CMRL'));
                     return (
                       <button
-                        key={stop.id}
+                        key={`${stop.id}-${sIdx}`}
                         type="button"
                         onClick={() => {
                           setSelectedFromStop(stop);
@@ -454,11 +486,11 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
               {/* Suggestions Dropdown for TO */}
               {showToDropdown && toSuggestions.length > 0 && (
                 <div className="absolute top-full left-0 right-0 z-30 mt-1.5 rounded-2xl bg-white border border-neutral-200 shadow-xl max-h-64 overflow-y-auto p-1.5 space-y-1">
-                  {toSuggestions.map((stop) => {
+                  {toSuggestions.map((stop, sIdx) => {
                     const isMetro = stop.isMetro ?? Boolean(stop.id && typeof stop.id === 'string' && stop.id.startsWith('CMRL'));
                     return (
                       <button
-                        key={stop.id}
+                        key={`${stop.id}-${sIdx}`}
                         type="button"
                         onClick={() => {
                           setSelectedToStop(stop);
@@ -792,9 +824,9 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2">
-                              {subsequentTrips.slice(0, 8).map((trip) => (
+                              {subsequentTrips.slice(0, 8).map((trip, sIdx) => (
                                 <button
-                                  key={trip.trip_id}
+                                  key={`${trip.trip_id}-${sIdx}`}
                                   onClick={() => handleViewJourney(trip)}
                                   className="px-3 py-1.5 rounded-full text-xs font-mono font-bold bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-200/80 transition cursor-pointer"
                                   title={`Departure at ${formatTimeTo12Hour(trip.departure_time)} - Click for stop sequence`}
@@ -822,7 +854,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-64 overflow-y-auto pr-1">
                               {allTrips.map((trip, tIdx) => (
                                 <div
-                                  key={trip.trip_id}
+                                  key={`${trip.trip_id}-${tIdx}`}
                                   onClick={() => handleViewJourney(trip)}
                                   className="p-3 rounded-xl bg-neutral-50 hover:bg-neutral-100 border border-neutral-200/80 flex items-center justify-between cursor-pointer transition text-xs"
                                 >
@@ -1003,13 +1035,13 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
 
               return (
                 <div className="mt-4 space-y-4">
-                  {displayJourneys.map((journey) => {
+                  {displayJourneys.map((journey, journeyIdx) => {
                     const isExpanded = !!expandedLegCards[journey.id];
                     const isDirect = journey.type === 'direct';
 
                     return (
                       <div
-                        key={journey.id}
+                        key={`${journey.id}-${journeyIdx}`}
                         className="rounded-3xl border border-neutral-200 bg-white p-5 sm:p-6 shadow-xs hover:border-black/20 transition"
                       >
                         {/* Card Header: Route Badge Chain & Transfer Info */}

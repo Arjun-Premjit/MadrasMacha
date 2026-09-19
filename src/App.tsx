@@ -8,6 +8,7 @@ import { StopsPage } from './components/pages/StopsPage';
 import { StopDetailPage } from './components/pages/StopDetailPage';
 import { MtcPage } from './components/pages/MtcPage';
 import { MetroPage } from './components/pages/MetroPage';
+import { FareCalculatorPage } from './components/pages/FareCalculatorPage';
 import { AboutPage } from './components/pages/AboutPage';
 import { PrivacyPolicyPage } from './components/pages/PrivacyPolicyPage';
 import { TermsPage } from './components/pages/TermsPage';
@@ -85,6 +86,7 @@ export default function App() {
         {currentPage === 'route-detail' && (
           <RouteDetailPage
             routeId={selectedRouteId || '18751'}
+            initialStopId={selectedStopId || undefined}
             onBack={() => handleNavigate('routes')}
             onSelectStop={handleSelectStopById}
           />
@@ -118,6 +120,10 @@ export default function App() {
             onSelectRoute={(route) => handleSelectRouteById(route.route_id)}
             onSelectStop={(stop) => handleSelectStopById(stop.stop_id)}
           />
+        )}
+
+        {currentPage === 'fare' && (
+          <FareCalculatorPage onBack={() => handleNavigate('home')} />
         )}
 
         {currentPage === 'about' && (

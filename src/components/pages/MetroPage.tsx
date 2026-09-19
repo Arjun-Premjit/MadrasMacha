@@ -13,7 +13,10 @@ import {
   ChevronRight,
   X,
   Compass,
+  Ticket,
 } from 'lucide-react';
+import { useLanguage } from '../../hooks/useLanguage';
+import { LanguageToggle } from '../LanguageToggle';
 
 interface MetroPageProps {
   routes?: Route[];
@@ -22,6 +25,7 @@ interface MetroPageProps {
 }
 
 export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute, onSelectStop }) => {
+  const { language, getStopName } = useLanguage();
   const [metroRoutes, setMetroRoutes] = useState<Route[]>([]);
   const [metroStops, setMetroStops] = useState<Stop[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<string>('CMRL_1');
@@ -301,30 +305,35 @@ export const MetroPage: React.FC<MetroPageProps> = ({ onSelectRoute, onSelectSto
                           {idx + 1}
                         </div>
 
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-neutral-900 group-hover:text-black">
-                              {station.stop_name}
-                            </span>
-                            {isTerminal && (
-                              <span className="text-[9px] font-bold uppercase tracking-wider bg-black text-white px-2 py-0.5 rounded-full">
-                                Terminal
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-bold text-neutral-900 group-hover:text-black">
+                                {getStopName(station.stop_name, station.stop_id)}
                               </span>
-                            )}
-                            {isInterchange && !isTerminal && (
-                              <span className="text-[9px] font-bold uppercase tracking-wider bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded-full">
-                                Interchange
-                              </span>
-                            )}
-                          </div>
+                              {language === 'ta' && (
+                                <span className="text-xs text-neutral-500 font-medium">
+                                  ({station.stop_name})
+                                </span>
+                              )}
+                              {isTerminal && (
+                                <span className="text-[9px] font-bold uppercase tracking-wider bg-black text-white px-2 py-0.5 rounded-full">
+                                  {language === 'ta' ? 'முனையம்' : 'Terminal'}
+                                </span>
+                              )}
+                              {isInterchange && !isTerminal && (
+                                <span className="text-[9px] font-bold uppercase tracking-wider bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded-full">
+                                  {language === 'ta' ? 'இணைப்பு' : 'Interchange'}
+                                </span>
+                              )}
+                            </div>
 
-                          <div className="text-[11px] text-neutral-400 font-mono mt-0.5 flex items-center gap-2">
-                            <span>ID: {station.stop_id}</span>
-                            {station.stop_lat && station.stop_lon && (
-                              <span>· {Number(station.stop_lat).toFixed(4)}° N, {Number(station.stop_lon).toFixed(4)}° E</span>
-                            )}
+                            <div className="text-[11px] text-neutral-400 font-mono mt-0.5 flex items-center gap-2">
+                              <span>ID: {station.stop_id}</span>
+                              {station.stop_lat && station.stop_lon && (
+                                <span>· {Number(station.stop_lat).toFixed(4)}° N, {Number(station.stop_lon).toFixed(4)}° E</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
                       </div>
 
                       <div className="flex items-center gap-2 text-right shrink-0">

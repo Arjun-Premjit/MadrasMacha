@@ -10,11 +10,14 @@ import {
   MapPin,
   Info,
   Database,
+  Ticket,
 } from 'lucide-react';
 import { Route } from '../types/transit';
 import { searchTransitViaRest, TransitSearchResult } from '../../lib/supabase/api';
+import { LanguageToggle } from './LanguageToggle';
+import { useLanguage } from '../hooks/useLanguage';
 
-export type PageView = 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'about' | 'privacy' | 'terms' | 'test';
+export type PageView = 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'fare' | 'about' | 'privacy' | 'terms' | 'test';
 
 interface HeaderProps {
   currentPage: PageView;
@@ -33,6 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectRoute,
   onSelectRouteId,
 }) => {
+  const { language, t } = useLanguage();
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<TransitSearchResult | null>(null);
@@ -86,12 +90,13 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const navLinks: { id: PageView; label: string; icon: React.ReactNode }[] = [
-    { id: 'home', label: 'Home', icon: <Home className="w-4 h-4" /> },
-    { id: 'mtc', label: 'MTC Buses', icon: <Bus className="w-4 h-4" /> },
-    { id: 'metro', label: 'Metro Rail', icon: <Train className="w-4 h-4" /> },
-    { id: 'routes', label: 'All Corridors', icon: <Navigation className="w-4 h-4" /> },
-    { id: 'stops', label: 'Stops & Stations', icon: <MapPin className="w-4 h-4" /> },
-    { id: 'about', label: 'About Transit', icon: <Info className="w-4 h-4" /> },
+    { id: 'home', label: language === 'ta' ? 'முகப்பு' : 'Home', icon: <Home className="w-4 h-4" /> },
+    { id: 'mtc', label: language === 'ta' ? 'MTC பேருந்து' : 'MTC Buses', icon: <Bus className="w-4 h-4" /> },
+    { id: 'metro', label: language === 'ta' ? 'மெட்ரோ ரயில்' : 'Metro Rail', icon: <Train className="w-4 h-4" /> },
+    { id: 'fare', label: language === 'ta' ? 'கட்டணம்' : 'Fare Calculator', icon: <Ticket className="w-4 h-4 text-sky-600" /> },
+    { id: 'routes', label: language === 'ta' ? 'வழித்தடங்கள்' : 'All Corridors', icon: <Navigation className="w-4 h-4" /> },
+    { id: 'stops', label: language === 'ta' ? 'நிறுத்தங்கள்' : 'Stops & Stations', icon: <MapPin className="w-4 h-4" /> },
+    { id: 'about', label: language === 'ta' ? 'பற்றி' : 'About Transit', icon: <Info className="w-4 h-4" /> },
     { id: 'test', label: 'Test Supabase', icon: <Database className="w-4 h-4 text-emerald-600" /> },
   ];
 
@@ -117,14 +122,14 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           {/* Desktop Navigation Links */}
-          <div className="hidden md:flex items-center gap-6 text-xs font-semibold tracking-wide text-neutral-600">
+          <div className="hidden md:flex items-center gap-5 text-xs font-semibold tracking-wide text-neutral-600">
             <button
               onClick={() => onNavigate('home')}
               className={`transition-colors hover:text-black cursor-pointer ${
                 currentPage === 'home' ? 'text-black font-bold underline underline-offset-4' : ''
               }`}
             >
-              Home
+              {language === 'ta' ? 'முகப்பு' : 'Home'}
             </button>
             <button
               onClick={() => onNavigate('mtc')}
@@ -143,12 +148,21 @@ export const Header: React.FC<HeaderProps> = ({
               Metro
             </button>
             <button
+              onClick={() => onNavigate('fare')}
+              className={`transition-colors hover:text-black cursor-pointer flex items-center gap-1 ${
+                currentPage === 'fare' ? 'text-sky-700 font-bold underline underline-offset-4' : 'text-sky-600 hover:text-sky-800'
+              }`}
+            >
+              <Ticket className="w-3.5 h-3.5" />
+              <span>{language === 'ta' ? 'கட்டணம்' : 'Fare'}</span>
+            </button>
+            <button
               onClick={() => onNavigate('routes')}
               className={`transition-colors hover:text-black cursor-pointer ${
                 currentPage === 'routes' ? 'text-black font-bold underline underline-offset-4' : ''
               }`}
             >
-              Routes
+              {language === 'ta' ? 'வழித்தடங்கள்' : 'Routes'}
             </button>
             <button
               onClick={() => onNavigate('stops')}
@@ -156,20 +170,15 @@ export const Header: React.FC<HeaderProps> = ({
                 currentPage === 'stops' ? 'text-black font-bold underline underline-offset-4' : ''
               }`}
             >
-              Stops
-            </button>
-            <button
-              onClick={() => onNavigate('about')}
-              className={`transition-colors hover:text-black cursor-pointer ${
-                currentPage === 'about' ? 'text-black font-bold underline underline-offset-4' : ''
-              }`}
-            >
-              About
+              {language === 'ta' ? 'நிறுத்தங்கள்' : 'Stops'}
             </button>
           </div>
 
-          {/* Glassmorphic Search Bar & Menu Buttons */}
+          {/* Glassmorphic Search Bar, Language Toggle & Menu Buttons */}
           <div className="flex items-center gap-2">
+            {/* Global Language Toggle (Bilingual Tamil / English) */}
+            <LanguageToggle variant="pill" className="shrink-0" />
+
             {/* Glassmorphism Search Bar in Header */}
             <button
               onClick={() => setIsSearchOpen(true)}
@@ -177,7 +186,9 @@ export const Header: React.FC<HeaderProps> = ({
               aria-label="Search transit network"
             >
               <Search className="w-3.5 h-3.5 text-neutral-700" />
-              <span className="text-xs text-neutral-700">Search routes...</span>
+              <span className="hidden sm:inline text-xs text-neutral-700">
+                {language === 'ta' ? 'தேடுக...' : 'Search...'}
+              </span>
             </button>
 
             {/* Menu Toggle Button (Three horizontal lines) */}

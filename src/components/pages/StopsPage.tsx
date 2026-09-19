@@ -17,6 +17,7 @@ import {
   RefreshCw,
   ExternalLink,
 } from 'lucide-react';
+import { useLanguage } from '../../hooks/useLanguage';
 
 interface StopsPageProps {
   onSelectStop: (stopId: string) => void;
@@ -29,6 +30,7 @@ export const StopsPage: React.FC<StopsPageProps> = ({
   onSelectRouteById,
   initialTypeFilter = 'all',
 }) => {
+  const { language, getStopName } = useLanguage();
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
   const [query, setQuery] = useState<string>('');
@@ -258,12 +260,18 @@ export const StopsPage: React.FC<StopsPageProps> = ({
                   <div>
                     <div className="flex flex-wrap items-center gap-2.5">
                       <h3 className="text-lg font-bold text-black group-hover:underline">
-                        {stop.stop_name}
+                        {getStopName(stop.stop_name, stop.stop_id)}
                       </h3>
+
+                      {language === 'ta' && getStopName(stop.stop_name, stop.stop_id) !== stop.stop_name && (
+                        <span className="text-xs text-neutral-500 font-medium">
+                          ({stop.stop_name})
+                        </span>
+                      )}
 
                       {isMetro && (
                         <span className="text-xs font-semibold uppercase tracking-wider text-white bg-blue-600 rounded-full px-3 py-0.5">
-                          Metro
+                          {language === 'ta' ? 'மெட்ரோ' : 'Metro'}
                         </span>
                       )}
 

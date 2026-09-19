@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   searchStopsForPlanner,
+  findTransitJourneys,
   findDirectJourneys,
   fetchCompleteJourney,
   JourneyMatch,
   GroupedRouteJourney,
   CompleteJourneyResult,
   formatTimeTo12Hour,
+  MIN_TRANSFER_MINUTES,
 } from '../lib/supabase/transitService';
-import { GroupedStop, Stop } from '../types/transit';
+import { GroupedStop, Stop, MultiLegJourney, JourneyLeg } from '../types/transit';
 import { useChennaiTime } from '../hooks/useChennaiTime';
 import {
   Search,
@@ -28,6 +30,9 @@ import {
   Calendar,
   Layers,
   Compass,
+  GitFork,
+  ArrowRightCircle,
+  Footprints,
 } from 'lucide-react';
 
 interface JourneyPlannerProps {
@@ -57,6 +62,12 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
   // Journey results state
   const [groupedJourneys, setGroupedJourneys] = useState<GroupedRouteJourney[] | null>(null);
   const [flatJourneys, setFlatJourneys] = useState<JourneyMatch[] | null>(null);
+  const [multiLegJourneys, setMultiLegJourneys] = useState<MultiLegJourney[] | null>(null);
+  const [directJourneys, setDirectJourneys] = useState<MultiLegJourney[] | null>(null);
+  const [connectingJourneys, setConnectingJourneys] = useState<MultiLegJourney[] | null>(null);
+  const [filterTab, setFilterTab] = useState<'all' | 'direct' | 'connecting'>('all');
+  const [expandedLegCards, setExpandedLegCards] = useState<Record<string, boolean>>({});
+
   const [resolvedFromStop, setResolvedFromStop] = useState<Stop | null>(null);
   const [resolvedToStop, setResolvedToStop] = useState<Stop | null>(null);
   const [viewMode, setViewMode] = useState<'grouped' | 'chronological'>('grouped');
@@ -153,7 +164,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     }));
   };
 
-  // Run Direct Journey algorithm
+  // Run Transit Journey algorithm (Direct + Connecting)
   const handleFindRoutes = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!selectedFromStop || !selectedToStop) {
@@ -173,26 +184,39 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     setSearchError(null);
     setGroupedJourneys(null);
     setFlatJourneys(null);
+    setMultiLegJourneys(null);
+    setDirectJourneys(null);
+    setConnectingJourneys(null);
 
     try {
-      const res = await findDirectJourneys(selectedFromStop, selectedToStop);
+      const res = await findTransitJourneys(selectedFromStop, selectedToStop);
       if (res.error) {
         setSearchError(res.error);
       } else {
         setGroupedJourneys(res.groupedJourneys);
         setFlatJourneys(res.journeys);
+        setMultiLegJourneys(res.multiLegJourneys);
+        setDirectJourneys(res.directJourneys);
+        setConnectingJourneys(res.connectingJourneys);
         setResolvedFromStop(res.fromStop);
         setResolvedToStop(res.toStop);
+
+        // If no direct journeys exist, automatically default to all or connecting
+        if (res.groupedJourneys.length === 0 && res.connectingJourneys.length > 0) {
+          setFilterTab('connecting');
+        } else {
+          setFilterTab('all');
+        }
       }
     } catch (err: any) {
       console.error('Find routes error:', err);
-      setSearchError(err?.message || 'Failed to search direct journeys in GTFS database.');
+      setSearchError(err?.message || 'Failed to search journeys in GTFS database.');
     } finally {
       setIsFindingRoutes(false);
     }
   };
 
-  // Open complete journey modal
+  // Open complete journey modal for a direct journey
   const handleViewJourney = async (journey: JourneyMatch) => {
     setActiveModalTrip({
       tripId: journey.trip_id,
@@ -220,6 +244,43 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
     } finally {
       setLoadingCompleteJourney(false);
     }
+  };
+
+  // Open complete journey modal for an individual leg of a multi-leg journey
+  const handleViewLeg = async (leg: JourneyLeg) => {
+    setActiveModalTrip({
+      tripId: leg.tripId,
+      fromStopId: leg.boardStopId,
+      toStopId: leg.alightingStopId,
+    });
+    setLoadingCompleteJourney(true);
+    setCompleteJourneyError(null);
+    setCompleteJourney(null);
+
+    try {
+      const res = await fetchCompleteJourney(
+        leg.tripId,
+        leg.boardStopId,
+        leg.alightingStopId
+      );
+      if (res.error || !res.data) {
+        setCompleteJourneyError(res.error || 'Unable to retrieve complete journey stop sequence.');
+      } else {
+        setCompleteJourney(res.data);
+      }
+    } catch (err: any) {
+      console.error('Fetch leg journey modal error:', err);
+      setCompleteJourneyError(err?.message || 'Failed to fetch leg details');
+    } finally {
+      setLoadingCompleteJourney(false);
+    }
+  };
+
+  const toggleLegCard = (journeyId: string) => {
+    setExpandedLegCards((prev) => ({
+      ...prev,
+      [journeyId]: !prev[journeyId],
+    }));
   };
 
   const totalDirectTrips = flatJourneys ? flatJourneys.length : 0;
@@ -448,7 +509,7 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
           {/* Submit Action */}
           <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-[11px] text-neutral-500">
-              Direct journeys only · Validates stop sequence (Origin &lt; Destination) across scheduled GTFS trips
+              Direct &amp; connecting routes · Enforces 5-min minimum transfer buffer between legs
             </div>
 
             <button
@@ -474,10 +535,10 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
         {/* ─────────────────────────────────────────────────────────────
             JOURNEY RESULTS SECTION
             ───────────────────────────────────────────────────────────── */}
-        {groupedJourneys !== null && (
+        {(groupedJourneys !== null || multiLegJourneys !== null) && (
           <div className="mt-10 pt-8 border-t border-neutral-100 animate-in fade-in duration-200">
             {/* Results Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4">
               <div>
                 <h3 className="text-xl font-black text-neutral-900">
                   Available Scheduled Services
@@ -487,13 +548,58 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                 </p>
               </div>
 
-              {/* View Mode Switcher and Counts */}
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-neutral-100 text-neutral-800">
-                  {totalDirectRoutes} {totalDirectRoutes === 1 ? 'Route' : 'Routes'} · {totalDirectTrips} Scheduled {totalDirectTrips === 1 ? 'Trip' : 'Trips'}
-                </span>
+              {/* Filter Tabs: All, Direct, Connecting */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex items-center p-1 bg-neutral-100 rounded-full text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab('all')}
+                    className={`px-3 py-1.5 rounded-full cursor-pointer transition flex items-center gap-1.5 ${
+                      filterTab === 'all'
+                        ? 'bg-white text-black shadow-2xs'
+                        : 'text-neutral-500 hover:text-black'
+                    }`}
+                  >
+                    <span>All Options</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-200 text-neutral-700">
+                      {multiLegJourneys ? multiLegJourneys.length : 0}
+                    </span>
+                  </button>
 
-                {totalDirectRoutes > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab('direct')}
+                    className={`px-3 py-1.5 rounded-full cursor-pointer transition flex items-center gap-1.5 ${
+                      filterTab === 'direct'
+                        ? 'bg-white text-black shadow-2xs'
+                        : 'text-neutral-500 hover:text-black'
+                    }`}
+                  >
+                    <span>Direct</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-200 text-neutral-700">
+                      {directJourneys ? directJourneys.length : totalDirectRoutes}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFilterTab('connecting')}
+                    className={`px-3 py-1.5 rounded-full cursor-pointer transition flex items-center gap-1.5 ${
+                      filterTab === 'connecting'
+                        ? 'bg-white text-black shadow-2xs'
+                        : 'text-neutral-500 hover:text-black'
+                    }`}
+                  >
+                    <GitFork className="w-3 h-3" />
+                    <span>Connecting</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-neutral-200 text-neutral-700">
+                      {connectingJourneys ? connectingJourneys.length : 0}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Sub-view switcher for direct mode */}
+                {filterTab === 'direct' && totalDirectRoutes > 0 && (
                   <div className="hidden sm:inline-flex items-center p-0.5 bg-neutral-100 rounded-full text-xs font-bold">
                     <button
                       type="button"
@@ -522,8 +628,54 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
               </div>
             </div>
 
-            {/* Results Display */}
-            {totalDirectRoutes > 0 ? (
+            {/* Connecting Journeys Status Banner if Direct = 0 */}
+            {totalDirectRoutes === 0 && (connectingJourneys?.length ?? 0) > 0 && (
+              <div className="mb-6 p-5 rounded-3xl bg-amber-50 border-2 border-amber-200/80 text-neutral-900 shadow-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3.5">
+                    <div className="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                      <GitFork className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-bold uppercase tracking-wider mb-1">
+                        No Direct Bus · Connecting Route Available
+                      </div>
+                      <h4 className="text-base sm:text-lg font-black text-neutral-900 tracking-tight">
+                        No Direct Bus, but Connecting Journeys are Available
+                      </h4>
+                      <p className="text-xs text-neutral-600 mt-1 leading-relaxed">
+                        No single bus serves both stops, but you can reach your destination by changing buses at{' '}
+                        <strong>{connectingJourneys[0]?.transfersInfo[0]?.transferStopName || 'the transfer hub'}</strong>.
+                      </p>
+                    </div>
+                  </div>
+
+                  {connectingJourneys[0] && (
+                    <div className="p-3 rounded-2xl bg-white/80 border border-amber-200/80 shrink-0 self-start sm:self-auto">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-neutral-500 mb-1">
+                        Suggested Connection
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {connectingJourneys[0].legs.map((leg, idx) => (
+                          <React.Fragment key={leg.tripId + idx}>
+                            <span className="px-2.5 py-1 rounded-lg bg-black text-white text-xs font-black">
+                              {leg.routeShortName}
+                            </span>
+                            {idx < connectingJourneys[0].legs.length - 1 && (
+                              <ArrowRight className="w-3.5 h-3.5 text-neutral-400" />
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* RESULTS RENDERING */}
+            {filterTab === 'direct' ? (
+              totalDirectRoutes > 0 ? (
               viewMode === 'grouped' ? (
                 /* GROUPED BY ROUTE VIEW */
                 <div className="mt-4 space-y-5">
@@ -794,16 +946,301 @@ export const JourneyPlanner: React.FC<JourneyPlannerProps> = ({
                 <p className="text-xs text-neutral-600 max-w-md mx-auto mt-1.5 leading-relaxed">
                   No direct MTC bus routes or Metro corridors currently serve both selected stops on a single continuous trip in the GTFS database.
                 </p>
-                <div className="mt-4 p-3.5 rounded-2xl bg-white border border-neutral-200 max-w-md mx-auto text-xs text-neutral-500 text-left">
-                  <strong className="text-neutral-800 block mb-1">Transit Commuter Tips:</strong>
-                  <ul className="list-disc list-inside space-y-1">
-                    <li>Try selecting a major junction (e.g. Guindy, Saidapet, T. Nagar, Central).</li>
-                    <li>Verify stop directionality or try swapping Origin and Destination.</li>
-                    <li>Browse full corridor lists on the Routes tab.</li>
-                  </ul>
-                </div>
+                {(connectingJourneys?.length ?? 0) > 0 ? (
+                  <div className="mt-5">
+                    <button
+                      type="button"
+                      onClick={() => setFilterTab('connecting')}
+                      className="rounded-full bg-black hover:bg-neutral-800 text-white text-xs font-bold px-6 py-3 transition shadow-sm cursor-pointer inline-flex items-center gap-2"
+                    >
+                      <GitFork className="w-3.5 h-3.5" />
+                      <span>View {connectingJourneys?.length} Connecting Journey Options</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-4 p-3.5 rounded-2xl bg-white border border-neutral-200 max-w-md mx-auto text-xs text-neutral-500 text-left">
+                    <strong className="text-neutral-800 block mb-1">Transit Commuter Tips:</strong>
+                    <ul className="list-disc list-inside space-y-1">
+                      <li>Try selecting a major junction (e.g. Guindy, Saidapet, T. Nagar, Central).</li>
+                      <li>Verify stop directionality or try swapping Origin and Destination.</li>
+                      <li>Browse full corridor lists on the Routes tab.</li>
+                    </ul>
+                  </div>
+                )}
               </div>
-            )}
+            )
+          ) : (
+            /* ALL OR CONNECTING MULTI-LEG JOURNEYS VIEW */
+            (() => {
+              const displayJourneys =
+                filterTab === 'connecting'
+                  ? (connectingJourneys || [])
+                  : (multiLegJourneys || []);
+
+              if (displayJourneys.length === 0) {
+                return (
+                  <div className="rounded-3xl border border-dashed border-neutral-300 p-8 sm:p-12 text-center mt-4 bg-neutral-50/50">
+                    <div className="w-12 h-12 rounded-2xl bg-neutral-200 text-neutral-600 flex items-center justify-center mx-auto mb-3">
+                      <Bus className="w-6 h-6" />
+                    </div>
+                    <h4 className="text-base font-bold text-neutral-900">
+                      No Scheduled Journey Found
+                    </h4>
+                    <p className="text-xs text-neutral-600 max-w-md mx-auto mt-1.5 leading-relaxed">
+                      No direct or connecting scheduled bus journey was found for the selected stops and requested time in the GTFS database.
+                    </p>
+                    <div className="mt-4 p-3.5 rounded-2xl bg-white border border-neutral-200 max-w-md mx-auto text-xs text-neutral-500 text-left">
+                      <strong className="text-neutral-800 block mb-1">Transit Commuter Tips:</strong>
+                      <ul className="list-disc list-inside space-y-1">
+                        <li>Try selecting a major transit hub (e.g. Broadway, Central, Tambaram, Guindy, Koyambedu).</li>
+                        <li>Verify stop directionality or try swapping Origin and Destination.</li>
+                        <li>Check if the service operates only at specific times or weekdays.</li>
+                      </ul>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="mt-4 space-y-4">
+                  {displayJourneys.map((journey) => {
+                    const isExpanded = !!expandedLegCards[journey.id];
+                    const isDirect = journey.type === 'direct';
+
+                    return (
+                      <div
+                        key={journey.id}
+                        className="rounded-3xl border border-neutral-200 bg-white p-5 sm:p-6 shadow-xs hover:border-black/20 transition"
+                      >
+                        {/* Card Header: Route Badge Chain & Transfer Info */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-neutral-100">
+                          {/* Route Chain Badges */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            {journey.legs.map((leg, idx) => (
+                              <React.Fragment key={`${leg.tripId}-${idx}`}>
+                                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-neutral-900 text-white text-xs font-bold shadow-2xs">
+                                  {leg.routeType === 1 || leg.agencyId === 'CMRL' ? (
+                                    <Train className="w-3.5 h-3.5 text-blue-400" />
+                                  ) : (
+                                    <Bus className="w-3.5 h-3.5 text-white" />
+                                  )}
+                                  <span>{leg.routeShortName}</span>
+                                </div>
+
+                                {idx < journey.legs.length - 1 && (
+                                  <div className="flex items-center gap-1 text-neutral-400">
+                                    <ArrowRight className="w-3.5 h-3.5" />
+                                  </div>
+                                )}
+                              </React.Fragment>
+                            ))}
+
+                            {/* Transfer Type Badge */}
+                            <span
+                              className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full ${
+                                isDirect
+                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                  : journey.transfers === 1
+                                  ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                                  : 'bg-purple-50 text-purple-900 border border-purple-200'
+                              }`}
+                            >
+                              {isDirect
+                                ? 'Direct (0 transfers)'
+                                : journey.transfers === 1
+                                ? '1 Transfer'
+                                : '2 Transfers'}
+                            </span>
+
+                            {/* Departure Timing Status */}
+                            {journey.isUpcoming ? (
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                                {journey.departsInMinutes === 0 ? 'Now' : `In ${journey.departsInMinutes} min`}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded-full">
+                                Departed
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Duration Summary */}
+                          <div className="text-right sm:self-auto self-start">
+                            <span className="text-base font-black text-neutral-900">
+                              {journey.totalDurationMinutes} min
+                            </span>
+                            {!isDirect && (
+                              <div className="text-[11px] text-neutral-500">
+                                Ride {journey.inVehicleDurationMinutes}m · Transfer wait {journey.waitingTimeMinutes}m
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Departure & Arrival Time Overview */}
+                        <div className="py-4 grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+                          <div className="flex items-center gap-3">
+                            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-100 shrink-0" />
+                            <div>
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
+                                Board Origin ({journey.origin.stop_name})
+                              </span>
+                              <span className="text-sm font-bold text-neutral-900 font-mono">
+                                {formatTimeTo12Hour(journey.departureTime)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Transfer Callout in middle */}
+                          {!isDirect ? (
+                            <div className="p-2.5 rounded-2xl bg-neutral-50 border border-neutral-200/80 text-center">
+                              <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider flex items-center justify-center gap-1">
+                                <GitFork className="w-3 h-3 text-amber-600" />
+                                <span>Transfer Hub</span>
+                              </div>
+                              <div className="text-xs font-bold text-neutral-800 truncate mt-0.5">
+                                {journey.transfersInfo[0]?.transferStopName}
+                              </div>
+                              <div className="text-[10px] text-neutral-500">
+                                Wait {journey.transfersInfo[0]?.waitMinutes} min · min {MIN_TRANSFER_MINUTES}m buffer
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-center text-xs text-neutral-400">
+                              <span>Single continuous service</span>
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-3 justify-start sm:justify-end">
+                            <div className="w-2.5 h-2.5 rounded-full bg-neutral-900 ring-4 ring-neutral-100 shrink-0 order-first sm:order-last" />
+                            <div className="sm:text-right">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block">
+                                Alight Destination ({journey.destination.stop_name})
+                              </span>
+                              <span className="text-sm font-bold text-neutral-900 font-mono">
+                                {formatTimeTo12Hour(journey.arrivalTime)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Expandable Step-by-Step Leg Details */}
+                        <div className="pt-2 border-t border-neutral-100">
+                          <button
+                            type="button"
+                            onClick={() => toggleLegCard(journey.id)}
+                            className="w-full py-2 text-xs font-bold text-neutral-600 hover:text-black flex items-center justify-between cursor-pointer transition"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <Footprints className="w-3.5 h-3.5 text-neutral-500" />
+                              <span>
+                                {isExpanded
+                                  ? 'Hide step-by-step leg breakdown'
+                                  : `View step-by-step itinerary (${journey.legs.length} ${
+                                      journey.legs.length === 1 ? 'leg' : 'legs'
+                                    })`}
+                              </span>
+                            </span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-4 h-4 text-neutral-400" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4 text-neutral-400" />
+                            )}
+                          </button>
+
+                          {isExpanded && (
+                            <div className="mt-3 space-y-3 pt-2 border-t border-neutral-100">
+                              {journey.legs.map((leg, legIdx) => {
+                                const transferAfter = journey.transfersInfo[legIdx];
+
+                                return (
+                                  <React.Fragment key={`${leg.tripId}-leg-${leg.legNumber}`}>
+                                    {/* Individual Leg Box */}
+                                    <div className="p-4 rounded-2xl bg-neutral-50/70 border border-neutral-200">
+                                      <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-neutral-900 text-white">
+                                            Leg {leg.legNumber}
+                                          </span>
+                                          <span className="text-xs font-bold text-neutral-900">
+                                            {leg.routeShortName} · {leg.routeLongName}
+                                          </span>
+                                        </div>
+
+                                        <button
+                                          type="button"
+                                          onClick={() => handleViewLeg(leg)}
+                                          className="text-[11px] font-bold text-black underline hover:text-neutral-700 cursor-pointer"
+                                        >
+                                          View Stops ({leg.stopsCount})
+                                        </button>
+                                      </div>
+
+                                      <div className="space-y-2 text-xs">
+                                        <div className="flex items-center justify-between">
+                                          <div className="flex items-center gap-2 text-neutral-700">
+                                            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                                            <span>Board: <strong>{leg.boardStopName}</strong></span>
+                                          </div>
+                                          <span className="font-mono font-bold text-neutral-900">
+                                            {formatTimeTo12Hour(leg.departureTime)}
+                                          </span>
+                                        </div>
+
+                                        <div className="text-[11px] text-neutral-500 pl-4">
+                                          Ride for {leg.durationMinutes} min ({leg.stopsCount} intermediate stops)
+                                        </div>
+
+                                        <div className="flex items-center justify-between">
+                                          <div className="flex items-center gap-2 text-neutral-700">
+                                            <span className="w-2 h-2 rounded-full bg-neutral-900" />
+                                            <span>Alight: <strong>{leg.alightingStopName}</strong></span>
+                                          </div>
+                                          <span className="font-mono font-bold text-neutral-900">
+                                            {formatTimeTo12Hour(leg.arrivalTime)}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Transfer Callout between legs */}
+                                    {transferAfter && (
+                                      <div className="p-3 rounded-2xl bg-amber-50/80 border border-amber-200 text-xs flex items-center justify-between gap-3 my-2">
+                                        <div className="flex items-center gap-2 text-amber-900">
+                                          <GitFork className="w-4 h-4 text-amber-600 shrink-0" />
+                                          <div>
+                                            <span className="font-bold block">
+                                              Transfer at {transferAfter.transferStopName}
+                                            </span>
+                                            <span className="text-[11px] text-amber-700">
+                                              Arrival: {formatTimeTo12Hour(transferAfter.fromLegArrival)} → Next departure: {formatTimeTo12Hour(transferAfter.toLegDeparture)}
+                                            </span>
+                                          </div>
+                                        </div>
+
+                                        <div className="text-right shrink-0">
+                                          <span className="text-xs font-bold text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-full">
+                                            Wait {transferAfter.waitMinutes} min
+                                          </span>
+                                          <span className="text-[10px] text-amber-700 block mt-0.5">
+                                            ≥ {MIN_TRANSFER_MINUTES} min buffer
+                                          </span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()
+          )}
           </div>
         )}
       </div>

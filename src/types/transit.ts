@@ -95,3 +95,52 @@ export interface GroupedStop {
   isMetro: boolean;
   sampleStop: Stop;
 }
+
+export interface JourneyLeg {
+  legNumber: number;
+  routeId: string;
+  routeShortName: string;
+  routeLongName: string;
+  routeType: number; // 1: Metro, 3: Bus
+  agencyId: string;
+  tripId: string;
+  directionId?: number | null;
+  serviceId?: string;
+  boardStopId: string;
+  boardStopName: string;
+  boardStop?: Stop;
+  departureTime: string;
+  alightingStopId: string;
+  alightingStopName: string;
+  alightingStop?: Stop;
+  arrivalTime: string;
+  durationMinutes: number;
+  stopsCount: number;
+}
+
+export interface TransferWait {
+  transferStopId: string;
+  transferStopName: string;
+  waitMinutes: number;
+  fromLegArrival: string;
+  toLegDeparture: string;
+}
+
+export interface MultiLegJourney {
+  id: string;
+  type: 'direct' | 'connecting';
+  transfers: number; // 0 for direct, 1, 2
+  origin: Stop;
+  destination: Stop;
+  departureTime: string;
+  arrivalTime: string;
+  totalDurationMinutes: number;
+  waitingTimeMinutes: number;
+  inVehicleDurationMinutes: number;
+  legs: JourneyLeg[];
+  transfersInfo: TransferWait[];
+  departsInMinutes: number;
+  isUpcoming: boolean;
+  routeSummary: string; // e.g. "21G" or "21G → 5E"
+}
+

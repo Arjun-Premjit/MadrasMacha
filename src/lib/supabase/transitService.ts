@@ -1,5 +1,23 @@
 import { supabase } from '../supabase';
-import { Route, Stop, Agency, GroupedStop } from '../../types/transit';
+import { Route, Stop, Agency, GroupedStop, JourneyLeg, TransferWait, MultiLegJourney } from '../../types/transit';
+
+/**
+ * Configurable minimum transfer buffer (in minutes) between connecting transit legs.
+ * GTFS timetable arrivals and departures enforce:
+ * earliestNextDeparture = previousLeg.arrivalTime + MIN_TRANSFER_MINUTES
+ */
+export const MIN_TRANSFER_MINUTES = 5;
+
+export interface TransitRoutingResult {
+  journeys: JourneyMatch[]; // Direct journeys (backward compatibility)
+  groupedJourneys: GroupedRouteJourney[]; // Grouped direct routes (backward compatibility)
+  multiLegJourneys: MultiLegJourney[]; // All journeys: Direct, 1-transfer, 2-transfer
+  directJourneys: MultiLegJourney[];
+  connectingJourneys: MultiLegJourney[];
+  fromStop: Stop | null;
+  toStop: Stop | null;
+  error: string | null;
+}
 
 export interface RouteTripDetail {
   trip_id: string;
@@ -1263,28 +1281,22 @@ export async function searchStopsForPlanner(query: string, maxGroups = 8): Promi
 }
 
 /**
- * Find Direct Bus/Transit Journeys between Stop A and Stop B.
+ * Time-dependent transit journey search supporting:
+ * 1. Direct journeys (A → B using one bus/metro)
+ * 2. 1-Transfer journeys (A → Transfer Stop → B using Bus 1 → Bus 2)
+ * 3. 2-Transfer journeys (A → Transfer Stop 1 → Transfer Stop 2 → B using Bus 1 → Bus 2 → Bus 3)
  *
- * Requirements fulfilled:
- * 1. Works for any stop combination: terminal-to-terminal, terminal-to-intermediate,
- *    intermediate-to-terminal, and intermediate-to-intermediate.
- * 2. Accepts multiple stop_ids for origin and destination (e.g. grouped stops).
- * 3. Enforces origin stop_sequence < destination stop_sequence on the same trip_id.
- * 4. Checks calendar active services for today's Chennai date & day.
- * 5. Intelligently groups matching trips by route, displaying the next scheduled departure,
- *    subsequent departures, and full timetable without duplicate visual cards.
- * 6. Sorts by: 1. Earliest upcoming departure, 2. Shortest duration, 3. Frequency.
+ * Enforces:
+ * - Minimum transfer buffer: MIN_TRANSFER_MINUTES = 5
+ * - Temporal feasibility: nextLeg.departure >= previousLeg.arrival + 5 min
+ * - No loop prevention: no repeated stops in any journey path
+ * - Same-bus continuation: same trip_id is treated as a direct journey, not a transfer
+ * - Pareto domination: removes suboptimal journeys dominated on departure, arrival, transfers, and duration
  */
-export async function findDirectJourneys(
+export async function findTransitJourneys(
   fromParam: string | string[] | { stopIds: string[] } | { stop_id: string },
   toParam: string | string[] | { stopIds: string[] } | { stop_id: string }
-): Promise<{
-  journeys: JourneyMatch[];
-  groupedJourneys: GroupedRouteJourney[];
-  fromStop: Stop | null;
-  toStop: Stop | null;
-  error: string | null;
-}> {
+): Promise<TransitRoutingResult> {
   try {
     // 1. Normalize input stop IDs
     const extractIds = (param: any): string[] => {
@@ -1301,7 +1313,16 @@ export async function findDirectJourneys(
     let toStopIds = extractIds(toParam);
 
     if (fromStopIds.length === 0 || toStopIds.length === 0) {
-      return { journeys: [], groupedJourneys: [], fromStop: null, toStop: null, error: 'Please select both origin and destination stops.' };
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        multiLegJourneys: [],
+        directJourneys: [],
+        connectingJourneys: [],
+        fromStop: null,
+        toStop: null,
+        error: 'Please select both origin and destination stops.',
+      };
     }
 
     // 2. Fetch stops metadata for origin and destination
@@ -1312,7 +1333,16 @@ export async function findDirectJourneys(
       .in('stop_id', allStopIdsToFetch);
 
     if (stopsError || !initialStops || initialStops.length === 0) {
-      return { journeys: [], groupedJourneys: [], fromStop: null, toStop: null, error: 'Selected stops could not be found in the database.' };
+      return {
+        journeys: [],
+        groupedJourneys: [],
+        multiLegJourneys: [],
+        directJourneys: [],
+        connectingJourneys: [],
+        fromStop: null,
+        toStop: null,
+        error: 'Selected stops could not be found in the database.',
+      };
     }
 
     const stopsMap = new Map<string, Stop>();
@@ -1323,7 +1353,7 @@ export async function findDirectJourneys(
       });
     }
 
-    // If single stop ID provided without grouped siblings, look up any sibling stops sharing the same name within 2km
+    // Look up sibling stops sharing the same name within reasonable proximity
     if (fromStopIds.length === 1) {
       const sA = stopsMap.get(fromStopIds[0]);
       if (sA) {
@@ -1335,7 +1365,10 @@ export async function findDirectJourneys(
         if (siblings && siblings.length > 0) {
           for (const sib of siblings) {
             fromStopIds.push(sib.stop_id);
-            stopsMap.set(sib.stop_id, { ...sib, is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')) });
+            stopsMap.set(sib.stop_id, {
+              ...sib,
+              is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')),
+            });
           }
           fromStopIds = Array.from(new Set(fromStopIds));
         }
@@ -1353,7 +1386,10 @@ export async function findDirectJourneys(
         if (siblings && siblings.length > 0) {
           for (const sib of siblings) {
             toStopIds.push(sib.stop_id);
-            stopsMap.set(sib.stop_id, { ...sib, is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')) });
+            stopsMap.set(sib.stop_id, {
+              ...sib,
+              is_metro_station: Boolean(sib?.stop_id && typeof sib.stop_id === 'string' && sib.stop_id.startsWith('CMRL')),
+            });
           }
           toStopIds = Array.from(new Set(toStopIds));
         }
@@ -1369,13 +1405,16 @@ export async function findDirectJourneys(
       return {
         journeys: [],
         groupedJourneys: [],
+        multiLegJourneys: [],
+        directJourneys: [],
+        connectingJourneys: [],
         fromStop: representativeFromStop,
         toStop: representativeToStop,
         error: 'Origin and destination are the same stop. Please select different stops.',
       };
     }
 
-    // 3. Query stop_times for fromStopIds (batched pagination up to 3000 rows across origin stops)
+    // 3. Query stop_times for origin stops (fromStopIds)
     const fromPromises: Promise<any>[] = [];
     for (const sId of fromStopIds) {
       for (let offset = 0; offset <= 2000; offset += 1000) {
@@ -1391,62 +1430,77 @@ export async function findDirectJourneys(
       }
     }
 
-    const fromResults = await Promise.all(fromPromises);
+    // Also query stop_times for destination stops (toStopIds)
+    const toPromises: Promise<any>[] = [];
+    for (const sId of toStopIds) {
+      for (let offset = 0; offset <= 2000; offset += 1000) {
+        toPromises.push(
+          Promise.resolve(
+            supabase
+              .from('stop_times')
+              .select('trip_id, stop_id, stop_sequence, arrival_time')
+              .eq('stop_id', sId)
+              .range(offset, offset + 999)
+          )
+        );
+      }
+    }
+
+    const [fromResults, toResults] = await Promise.all([
+      Promise.all(fromPromises),
+      Promise.all(toPromises),
+    ]);
+
     const stFrom = fromResults.flatMap((r) => r.data || []);
+    const stTo = toResults.flatMap((r) => r.data || []);
 
     if (stFrom.length === 0) {
       return {
         journeys: [],
         groupedJourneys: [],
+        multiLegJourneys: [],
+        directJourneys: [],
+        connectingJourneys: [],
         fromStop: representativeFromStop,
         toStop: representativeToStop,
         error: null,
       };
     }
 
+    // Build lookup maps for trips departing from origin and arriving at destination
     const fromTripMap = new Map<
       string,
       { trip_id: string; stop_id: string; stop_sequence: number; departure_time: string }
     >();
-
     for (const f of stFrom) {
       if (f.trip_id && f.departure_time) {
-        fromTripMap.set(f.trip_id, f);
+        // In case of multiple stops at the same terminal, record the earliest departure or first occurrence
+        if (!fromTripMap.has(f.trip_id) || fromTripMap.get(f.trip_id)!.stop_sequence > f.stop_sequence) {
+          fromTripMap.set(f.trip_id, f);
+        }
       }
     }
 
-    const candidateTripIds = Array.from(fromTripMap.keys());
-    if (candidateTripIds.length === 0) {
-      return {
-        journeys: [],
-        groupedJourneys: [],
-        fromStop: representativeFromStop,
-        toStop: representativeToStop,
-        error: null,
-      };
+    const toTripMap = new Map<
+      string,
+      { trip_id: string; stop_id: string; stop_sequence: number; arrival_time: string }
+    >();
+    for (const t of stTo) {
+      if (t.trip_id && t.arrival_time) {
+        if (!toTripMap.has(t.trip_id) || toTripMap.get(t.trip_id)!.stop_sequence < t.stop_sequence) {
+          toTripMap.set(t.trip_id, t);
+        }
+      }
     }
 
-    // 4. Query stop_times for toStopIds matching candidateTripIds (in chunks of 100)
-    const batchSize = 100;
-    const toPromises: Promise<any>[] = [];
-    for (let i = 0; i < candidateTripIds.length; i += batchSize) {
-      const chunk = candidateTripIds.slice(i, i + batchSize);
-      toPromises.push(
-        Promise.resolve(
-          supabase
-            .from('stop_times')
-            .select('trip_id, stop_id, stop_sequence, arrival_time')
-            .in('stop_id', toStopIds)
-            .in('trip_id', chunk)
-        )
-      );
-    }
+    // 4. Check active calendar services and current Chennai time
+    const { activeServiceIds } = await fetchActiveCalendarServices();
+    const activeServiceSet = new Set(activeServiceIds);
+    const { currentTimeStr } = getChennaiDateTime(new Date());
 
-    const toResults = await Promise.all(toPromises);
-    const stTo = toResults.flatMap((r) => r.data || []);
-
-    // 5. Match journeys where origin stop_sequence < destination stop_sequence
-    const validMatches: {
+    // 5. IDENTIFY DIRECT JOURNEYS (0 TRANSFERS)
+    // Any trip_id present in both fromTripMap and toTripMap where fromSeq < toSeq
+    const directMatches: {
       trip_id: string;
       from_stop_id: string;
       to_stop_id: string;
@@ -1457,16 +1511,11 @@ export async function findDirectJourneys(
       stopsCount: number;
     }[] = [];
 
-    for (const t of stTo) {
-      const f = fromTripMap.get(t.trip_id);
-      if (
-        f &&
-        f.stop_sequence < t.stop_sequence &&
-        f.departure_time &&
-        t.arrival_time
-      ) {
-        validMatches.push({
-          trip_id: t.trip_id,
+    for (const [tripId, f] of fromTripMap.entries()) {
+      const t = toTripMap.get(tripId);
+      if (t && f.stop_sequence < t.stop_sequence && f.departure_time && t.arrival_time) {
+        directMatches.push({
+          trip_id: tripId,
           from_stop_id: f.stop_id,
           to_stop_id: t.stop_id,
           depTime: f.departure_time,
@@ -1478,83 +1527,504 @@ export async function findDirectJourneys(
       }
     }
 
-    if (validMatches.length === 0) {
-      return {
-        journeys: [],
-        groupedJourneys: [],
-        fromStop: representativeFromStop,
-        toStop: representativeToStop,
-        error: null,
-      };
-    }
+    // 6. IDENTIFY CONNECTING JOURNEYS (1-TRANSFER & 2-TRANSFERS)
+    // Candidate Leg 1 trips: departing from origin
+    const candidateLeg1TripIds = Array.from(fromTripMap.keys());
+    // Candidate Leg 2 (or final leg) trips: arriving at destination
+    const candidateDestTripIds = Array.from(toTripMap.keys());
 
-    // 6. Query trips metadata
-    const matchedTripIds = Array.from(new Set(validMatches.map((m) => m.trip_id)));
-    const tripPromises: Promise<any>[] = [];
-    for (let i = 0; i < matchedTripIds.length; i += batchSize) {
-      tripPromises.push(
+    // Batch fetch trips metadata to check route_id and active calendar service
+    const allTripsToLookup = Array.from(
+      new Set([...directMatches.map((m) => m.trip_id), ...candidateLeg1TripIds, ...candidateDestTripIds])
+    );
+
+    const batchSize = 100;
+    const tripMetaPromises: Promise<any>[] = [];
+    for (let i = 0; i < allTripsToLookup.length; i += batchSize) {
+      tripMetaPromises.push(
         Promise.resolve(
           supabase
             .from('trips')
             .select('trip_id, route_id, service_id, direction_id, trip_headsign')
-            .in('trip_id', matchedTripIds.slice(i, i + batchSize))
+            .in('trip_id', allTripsToLookup.slice(i, i + batchSize))
         )
       );
     }
 
-    const tripsRes = await Promise.all(tripPromises);
-    const tripsData = tripsRes.flatMap((r) => r.data || []);
-    const tripMap = new Map(tripsData.map((t) => [t.trip_id, t]));
+    const tripMetaRes = await Promise.all(tripMetaPromises);
+    const tripsData = tripMetaRes.flatMap((r) => r.data || []);
+    const tripMap = new Map<string, any>(tripsData.map((t) => [t.trip_id, t]));
 
-    // 7. Check active calendar services today
-    const { activeServiceIds } = await fetchActiveCalendarServices();
-    const activeServiceSet = new Set(activeServiceIds);
-    const { currentTimeStr } = getChennaiDateTime(new Date());
+    // Filter candidate trips: if active calendar services exist, prioritize active trips
+    const hasActiveServices = activeServiceSet.size > 0;
+    const filterActiveTrip = (tripId: string) => {
+      if (!hasActiveServices) return true;
+      const trip = tripMap.get(tripId);
+      return trip ? activeServiceSet.has(trip.service_id) : false;
+    };
 
-    // 8. Filter valid trips by active calendar services
-    const activeValidMatches = validMatches.filter((m) => {
-      const trip = tripMap.get(m.trip_id);
-      return trip && activeServiceSet.has(trip.service_id);
+    const activeDirectMatches = directMatches.filter((m) => filterActiveTrip(m.trip_id));
+    const validDirectMatches = activeDirectMatches.length > 0 ? activeDirectMatches : directMatches;
+
+    console.log('=== ROUTE SEARCH ===');
+    console.log(`A = ${representativeFromStop.stop_name} (${fromStopIds.join(', ')})`);
+    console.log(`B = ${representativeToStop.stop_name} (${toStopIds.join(', ')})`);
+    console.log('=== DIRECT SEARCH ===');
+    console.log(`Direct journeys found: ${validDirectMatches.length}`);
+    console.log('=== CONNECTING SEARCH ===');
+
+    // 7. PATTERN-BASED TRANSFER HUB DISCOVERY ACROSS ALL ROUTES
+    // Group candidate origin and destination trips by route pattern (route_id + direction_id)
+    // to ensure representative coverage of every single route operating at Origin and Destination
+    const fromPatterns = new Map<string, string>();
+    for (const tId of candidateLeg1TripIds) {
+      const t = tripMap.get(tId);
+      if (!t) continue;
+      const key = `${t.route_id}_${t.direction_id ?? 0}`;
+      if (!fromPatterns.has(key)) fromPatterns.set(key, tId);
+    }
+
+    const toPatterns = new Map<string, string>();
+    for (const tId of candidateDestTripIds) {
+      const t = tripMap.get(tId);
+      if (!t) continue;
+      const key = `${t.route_id}_${t.direction_id ?? 0}`;
+      if (!toPatterns.has(key)) toPatterns.set(key, tId);
+    }
+
+    const repFromTrips = Array.from(fromPatterns.values());
+    const repToTrips = Array.from(toPatterns.values());
+
+    // Fetch stop sequences for representative trips to find potential transfer stops
+    const repFromStopTimesPromises: Promise<any>[] = [];
+    for (let i = 0; i < repFromTrips.length; i += batchSize) {
+      repFromStopTimesPromises.push(
+        Promise.resolve(
+          supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence')
+            .in('trip_id', repFromTrips.slice(i, i + batchSize))
+        )
+      );
+    }
+
+    const repToStopTimesPromises: Promise<any>[] = [];
+    for (let i = 0; i < repToTrips.length; i += batchSize) {
+      repToStopTimesPromises.push(
+        Promise.resolve(
+          supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence')
+            .in('trip_id', repToTrips.slice(i, i + batchSize))
+        )
+      );
+    }
+
+    const [repFromRes, repToRes] = await Promise.all([
+      Promise.all(repFromStopTimesPromises),
+      Promise.all(repToStopTimesPromises),
+    ]);
+
+    const repFromStopTimes = repFromRes.flatMap((r) => r.data || []);
+    const repToStopTimes = repToRes.flatMap((r) => r.data || []);
+
+    // Downstream reachable stops from origin: stop_id -> Set<route_id>
+    const downstreamMap = new Map<string, Set<string>>();
+    for (const st of repFromStopTimes) {
+      const orig = fromTripMap.get(st.trip_id);
+      if (orig && st.stop_sequence > orig.stop_sequence) {
+        if (!downstreamMap.has(st.stop_id)) downstreamMap.set(st.stop_id, new Set());
+        const tripObj = tripMap.get(st.trip_id);
+        if (tripObj) downstreamMap.get(st.stop_id)!.add(tripObj.route_id);
+      }
+    }
+
+    // Upstream feeder stops to destination: stop_id -> Set<route_id>
+    const upstreamMap = new Map<string, Set<string>>();
+    for (const st of repToStopTimes) {
+      const dest = toTripMap.get(st.trip_id);
+      if (dest && st.stop_sequence < dest.stop_sequence) {
+        if (!upstreamMap.has(st.stop_id)) upstreamMap.set(st.stop_id, new Set());
+        const tripObj = tripMap.get(st.trip_id);
+        if (tripObj) upstreamMap.get(st.stop_id)!.add(tripObj.route_id);
+      }
+    }
+
+    // Common stops visited after origin and before destination
+    const candidateHubIds = Array.from(downstreamMap.keys()).filter(
+      (sId) => upstreamMap.has(sId) && !fromStopIds.includes(sId) && !toStopIds.includes(sId)
+    );
+
+    // Rank candidate hubs by route connectivity
+    candidateHubIds.sort((a, b) => {
+      const scoreA = (downstreamMap.get(a)?.size || 0) * (upstreamMap.get(a)?.size || 0);
+      const scoreB = (downstreamMap.get(b)?.size || 0) * (upstreamMap.get(b)?.size || 0);
+      return scoreB - scoreA;
     });
 
-    const matchesToUse = activeValidMatches.length > 0 ? activeValidMatches : validMatches;
+    // Select top 15 candidate transfer hubs
+    const topHubs = candidateHubIds.slice(0, 15);
 
-    // 9. Query routes metadata
-    const routeIds = Array.from(
-      new Set(matchesToUse.map((m) => tripMap.get(m.trip_id)?.route_id).filter(Boolean))
-    );
+    // Query actual stop_times at top candidate hubs for origin trips and dest trips
+    const hubLeg1Promises: Promise<any>[] = [];
+    for (let i = 0; i < candidateLeg1TripIds.length; i += batchSize) {
+      hubLeg1Promises.push(
+        Promise.resolve(
+          supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence, arrival_time')
+            .in('trip_id', candidateLeg1TripIds.slice(i, i + batchSize))
+            .in('stop_id', topHubs)
+        )
+      );
+    }
 
-    const { data: routesData } = await supabase
-      .from('routes')
-      .select('*')
-      .in('route_id', routeIds);
+    const hubLeg2Promises: Promise<any>[] = [];
+    for (let i = 0; i < candidateDestTripIds.length; i += batchSize) {
+      hubLeg2Promises.push(
+        Promise.resolve(
+          supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence, departure_time')
+            .in('trip_id', candidateDestTripIds.slice(i, i + batchSize))
+            .in('stop_id', topHubs)
+        )
+      );
+    }
 
-    const routeMap = new Map((routesData || []).map((r) => [r.route_id, r]));
+    const [hubLeg1Res, hubLeg2Res] = await Promise.all([
+      Promise.all(hubLeg1Promises),
+      Promise.all(hubLeg2Promises),
+    ]);
 
-    // 10. Fetch missing stop records for any specific platform points
-    const neededStopIds = Array.from(
-      new Set(matchesToUse.flatMap((m) => [m.from_stop_id, m.to_stop_id]))
-    );
-    const missingStopIds = neededStopIds.filter((id) => !stopsMap.has(id));
-    if (missingStopIds.length > 0) {
-      const { data: extraStops } = await supabase
-        .from('stops')
-        .select('*')
-        .in('stop_id', missingStopIds);
-      if (extraStops) {
-        for (const es of extraStops) {
-          stopsMap.set(es.stop_id, {
-            ...es,
-            is_metro_station: Boolean(es?.stop_id && typeof es.stop_id === 'string' && es.stop_id.startsWith('CMRL')),
+    const leg1AtHubs = hubLeg1Res.flatMap((r) => r.data || []);
+    const leg2AtHubs = hubLeg2Res.flatMap((r) => r.data || []);
+
+    // 8. CORRELATE 1-TRANSFER CANDIDATES (A → X → B)
+    interface CandidateTransfer {
+      type: 'connecting';
+      transfers: 1;
+      leg1: {
+        trip_id: string;
+        from_stop_id: string;
+        to_stop_id: string;
+        departure_time: string;
+        arrival_time: string;
+        stops_count: number;
+      };
+      leg2: {
+        trip_id: string;
+        from_stop_id: string;
+        to_stop_id: string;
+        departure_time: string;
+        arrival_time: string;
+        stops_count: number;
+      };
+      transfer_stop_id: string;
+      wait_minutes: number;
+      total_duration_minutes: number;
+    }
+
+    const candidate1Transfers: CandidateTransfer[] = [];
+
+    for (const hubId of topHubs) {
+      const leg1Arrivals = leg1AtHubs.filter((h) => h.stop_id === hubId);
+      const leg2Departures = leg2AtHubs.filter((h) => h.stop_id === hubId);
+
+      for (const l1 of leg1Arrivals) {
+        const orig = fromTripMap.get(l1.trip_id);
+        if (!orig || orig.stop_sequence >= l1.stop_sequence || !orig.departure_time || !l1.arrival_time) continue;
+
+        const l1ArrSec = parseGTFSSeconds(l1.arrival_time);
+        const minL2DepSec = l1ArrSec + MIN_TRANSFER_MINUTES * 60; // 5 min transfer buffer
+
+        // Group Leg 2 departures by route to find optimal connection per route
+        const bestLeg2PerRoute = new Map<string, { l2: any; dest: any; waitMinutes: number }>();
+
+        for (const l2 of leg2Departures) {
+          // Same-bus continuation is already a direct journey, not a transfer
+          if (l1.trip_id === l2.trip_id) continue;
+
+          const dest = toTripMap.get(l2.trip_id);
+          if (!dest || l2.stop_sequence >= dest.stop_sequence || !l2.departure_time || !dest.arrival_time) continue;
+
+          const l2DepSec = parseGTFSSeconds(l2.departure_time);
+
+          // Enforce: l2 departure >= l1 arrival + MIN_TRANSFER_MINUTES (5 min)
+          if (l2DepSec >= minL2DepSec) {
+            const waitMinutes = Math.round((l2DepSec - l1ArrSec) / 60);
+
+            // Maximum realistic transfer wait: 90 minutes
+            if (waitMinutes >= MIN_TRANSFER_MINUTES && waitMinutes <= 90) {
+              const trip2Obj = tripMap.get(l2.trip_id);
+              const routeKey = trip2Obj?.route_id || l2.trip_id;
+              const existing = bestLeg2PerRoute.get(routeKey);
+              if (!existing || existing.waitMinutes > waitMinutes) {
+                bestLeg2PerRoute.set(routeKey, { l2, dest, waitMinutes });
+              }
+            }
+          }
+        }
+
+        for (const { l2, dest, waitMinutes } of bestLeg2PerRoute.values()) {
+          const totalDurationMinutes = calculateDurationMinutes(orig.departure_time, dest.arrival_time);
+
+          candidate1Transfers.push({
+            type: 'connecting',
+            transfers: 1,
+            leg1: {
+              trip_id: l1.trip_id,
+              from_stop_id: orig.stop_id,
+              to_stop_id: hubId,
+              departure_time: orig.departure_time,
+              arrival_time: l1.arrival_time,
+              stops_count: l1.stop_sequence - orig.stop_sequence,
+            },
+            leg2: {
+              trip_id: l2.trip_id,
+              from_stop_id: hubId,
+              to_stop_id: dest.stop_id,
+              departure_time: l2.departure_time,
+              arrival_time: dest.arrival_time,
+              stops_count: dest.stop_sequence - l2.stop_sequence,
+            },
+            transfer_stop_id: hubId,
+            wait_minutes: waitMinutes,
+            total_duration_minutes: totalDurationMinutes,
           });
         }
       }
     }
 
-    // 11. Build JourneyMatch records
-    const allBuiltJourneys: JourneyMatch[] = [];
+    if (candidate1Transfers.length > 0) {
+      const sample = candidate1Transfers[0];
+      const trip1 = tripMap.get(sample.leg1.trip_id);
+      const trip2 = tripMap.get(sample.leg2.trip_id);
+      console.log(`First-leg candidate: Trip ${sample.leg1.trip_id} (Route ${trip1?.route_id}) ${sample.leg1.departure_time} -> Stop ${sample.transfer_stop_id} ${sample.leg1.arrival_time}`);
+      console.log(`Transfer: Stop ${sample.transfer_stop_id} Arrival: ${sample.leg1.arrival_time} Wait: ${sample.wait_minutes} min, Next dep: ${sample.leg2.departure_time}`);
+      console.log(`Second-leg candidate: Trip ${sample.leg2.trip_id} (Route ${trip2?.route_id}) ${sample.leg2.departure_time} -> Dest ${sample.leg2.arrival_time}`);
+      console.log('CONNECTION VALID');
+    }
 
-    for (const m of matchesToUse) {
+    // 9. CHECK 2-TRANSFER CANDIDATES (A → X1 → X2 → B)
+    // Evaluated when direct or 1-transfer journeys are limited (< 6 options)
+    interface Candidate2Transfer {
+      type: 'connecting';
+      transfers: 2;
+      leg1: {
+        trip_id: string;
+        from_stop_id: string;
+        to_stop_id: string;
+        departure_time: string;
+        arrival_time: string;
+        stops_count: number;
+      };
+      leg2: {
+        trip_id: string;
+        from_stop_id: string;
+        to_stop_id: string;
+        departure_time: string;
+        arrival_time: string;
+        stops_count: number;
+      };
+      leg3: {
+        trip_id: string;
+        from_stop_id: string;
+        to_stop_id: string;
+        departure_time: string;
+        arrival_time: string;
+        stops_count: number;
+      };
+      transfer1_stop_id: string;
+      transfer2_stop_id: string;
+      wait1_minutes: number;
+      wait2_minutes: number;
+      total_duration_minutes: number;
+    }
+
+    const candidate2Transfers: Candidate2Transfer[] = [];
+
+    if (validDirectMatches.length + candidate1Transfers.length < 8) {
+      // Find candidate intermediate hubs from downstream and upstream reachable stops
+      const x1Candidates = Array.from(downstreamMap.keys()).slice(0, 15);
+      const x2Candidates = Array.from(upstreamMap.keys()).slice(0, 15);
+
+      // Search trips that connect an X1 to an X2
+      if (x1Candidates.length > 0 && x2Candidates.length > 0) {
+        const { data: middleStopTimes } = await supabase
+          .from('stop_times')
+          .select('trip_id, stop_id, stop_sequence, arrival_time, departure_time')
+          .in('stop_id', x1Candidates)
+          .limit(1000);
+
+        if (middleStopTimes && middleStopTimes.length > 0) {
+          const middleTripIds = Array.from(new Set(middleStopTimes.map((m) => m.trip_id))).slice(0, 30);
+          const { data: middleDestStopTimes } = await supabase
+            .from('stop_times')
+            .select('trip_id, stop_id, stop_sequence, arrival_time, departure_time')
+            .in('trip_id', middleTripIds)
+            .in('stop_id', x2Candidates);
+
+          if (middleDestStopTimes && middleDestStopTimes.length > 0) {
+            // Map middle trips: X1 -> X2
+            for (const m2 of middleDestStopTimes) {
+              const m1List = middleStopTimes.filter(
+                (m) => m.trip_id === m2.trip_id && m.stop_sequence < m2.stop_sequence && m.departure_time
+              );
+
+              for (const m1 of m1List) {
+                const x1Id = m1.stop_id;
+                const x2Id = m2.stop_id;
+                if (x1Id === x2Id) continue;
+
+                // Match Leg 1 arriving at X1
+                const l1List = leg1AtHubs.filter((h) => h.stop_id === x1Id).slice(0, 4);
+                // Match Leg 3 departing from X2
+                const l3List = leg2AtHubs.filter((h) => h.stop_id === x2Id).slice(0, 4);
+
+                for (const l1 of l1List) {
+                  const orig = fromTripMap.get(l1.trip_id);
+                  if (!orig || l1.trip_id === m1.trip_id) continue;
+
+                  const l1ArrSec = parseGTFSSeconds(l1.arrival_time);
+                  const m1DepSec = parseGTFSSeconds(m1.departure_time);
+                  const wait1 = Math.round((m1DepSec - l1ArrSec) / 60);
+
+                  if (wait1 >= MIN_TRANSFER_MINUTES && wait1 <= 75) {
+                    const m2ArrSec = parseGTFSSeconds(m2.arrival_time);
+
+                    for (const l3 of l3List) {
+                      const dest = toTripMap.get(l3.trip_id);
+                      if (!dest || l3.trip_id === m1.trip_id || l3.trip_id === l1.trip_id) continue;
+
+                      const l3DepSec = parseGTFSSeconds(l3.departure_time);
+                      const wait2 = Math.round((l3DepSec - m2ArrSec) / 60);
+
+                      if (wait2 >= MIN_TRANSFER_MINUTES && wait2 <= 75) {
+                        const totalDur = calculateDurationMinutes(orig.departure_time, dest.arrival_time);
+
+                        candidate2Transfers.push({
+                          type: 'connecting',
+                          transfers: 2,
+                          leg1: {
+                            trip_id: l1.trip_id,
+                            from_stop_id: orig.stop_id,
+                            to_stop_id: x1Id,
+                            departure_time: orig.departure_time,
+                            arrival_time: l1.arrival_time,
+                            stops_count: l1.stop_sequence - orig.stop_sequence,
+                          },
+                          leg2: {
+                            trip_id: m1.trip_id,
+                            from_stop_id: x1Id,
+                            to_stop_id: x2Id,
+                            departure_time: m1.departure_time,
+                            arrival_time: m2.arrival_time,
+                            stops_count: m2.stop_sequence - m1.stop_sequence,
+                          },
+                          leg3: {
+                            trip_id: l3.trip_id,
+                            from_stop_id: x2Id,
+                            to_stop_id: dest.stop_id,
+                            departure_time: l3.departure_time,
+                            arrival_time: dest.arrival_time,
+                            stops_count: dest.stop_sequence - l3.stop_sequence,
+                          },
+                          transfer1_stop_id: x1Id,
+                          transfer2_stop_id: x2Id,
+                          wait1_minutes: wait1,
+                          wait2_minutes: wait2,
+                          total_duration_minutes: totalDur,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 10. GATHER ALL NEEDED TRIP, ROUTE, AND STOP METADATA
+    const allUsedTripIds = new Set<string>();
+    const allUsedStopIds = new Set<string>([...fromStopIds, ...toStopIds]);
+
+    for (const m of validDirectMatches) {
+      allUsedTripIds.add(m.trip_id);
+      allUsedStopIds.add(m.from_stop_id);
+      allUsedStopIds.add(m.to_stop_id);
+    }
+    for (const c of candidate1Transfers) {
+      allUsedTripIds.add(c.leg1.trip_id);
+      allUsedTripIds.add(c.leg2.trip_id);
+      allUsedStopIds.add(c.transfer_stop_id);
+    }
+    for (const c of candidate2Transfers) {
+      allUsedTripIds.add(c.leg1.trip_id);
+      allUsedTripIds.add(c.leg2.trip_id);
+      allUsedTripIds.add(c.leg3.trip_id);
+      allUsedStopIds.add(c.transfer1_stop_id);
+      allUsedStopIds.add(c.transfer2_stop_id);
+    }
+
+    // Fetch any missing trips
+    const missingTripIds = Array.from(allUsedTripIds).filter((id) => !tripMap.has(id));
+    if (missingTripIds.length > 0) {
+      for (let i = 0; i < missingTripIds.length; i += batchSize) {
+        const { data: extraTrips } = await supabase
+          .from('trips')
+          .select('trip_id, route_id, service_id, direction_id, trip_headsign')
+          .in('trip_id', missingTripIds.slice(i, i + batchSize));
+        if (extraTrips) {
+          for (const t of extraTrips) tripMap.set(t.trip_id, t);
+        }
+      }
+    }
+
+    // Fetch all needed routes
+    const routeIds = Array.from(
+      new Set(Array.from(allUsedTripIds).map((tId) => tripMap.get(tId)?.route_id).filter(Boolean))
+    ) as string[];
+
+    const routeMap = new Map<string, Route>();
+    if (routeIds.length > 0) {
+      for (let i = 0; i < routeIds.length; i += batchSize) {
+        const { data: routesData } = await supabase
+          .from('routes')
+          .select('*')
+          .in('route_id', routeIds.slice(i, i + batchSize));
+        if (routesData) {
+          for (const r of routesData) routeMap.set(r.route_id, r);
+        }
+      }
+    }
+
+    // Fetch any missing stops
+    const missingStopIds = Array.from(allUsedStopIds).filter((id) => !stopsMap.has(id));
+    if (missingStopIds.length > 0) {
+      for (let i = 0; i < missingStopIds.length; i += batchSize) {
+        const { data: extraStops } = await supabase
+          .from('stops')
+          .select('*')
+          .in('stop_id', missingStopIds.slice(i, i + batchSize));
+        if (extraStops) {
+          for (const es of extraStops) {
+            stopsMap.set(es.stop_id, {
+              ...es,
+              is_metro_station: Boolean(es?.stop_id && typeof es.stop_id === 'string' && es.stop_id.startsWith('CMRL')),
+            });
+          }
+        }
+      }
+    }
+
+    // 11. BUILD STRUCTURED MULTI-LEG JOURNEYS
+    const allConstructedJourneys: MultiLegJourney[] = [];
+
+    // A. Add Direct Journeys (0 Transfers)
+    for (const m of validDirectMatches) {
       const trip = tripMap.get(m.trip_id);
       if (!trip) continue;
       const route = routeMap.get(trip.route_id);
@@ -1562,7 +2032,335 @@ export async function findDirectJourneys(
 
       const fromStopObj = stopsMap.get(m.from_stop_id) || representativeFromStop;
       const toStopObj = stopsMap.get(m.to_stop_id) || representativeToStop;
+      const durationMinutes = calculateDurationMinutes(m.depTime, m.arrTime);
+      const isUpcoming = m.depTime >= currentTimeStr;
+      const departsInMinutes = isUpcoming ? calculateDurationMinutes(currentTimeStr, m.depTime) : 0;
 
+      const leg: JourneyLeg = {
+        legNumber: 1,
+        routeId: route.route_id,
+        routeShortName: route.route_short_name || route.route_id,
+        routeLongName: route.route_long_name || '',
+        routeType: route.route_type ?? (route.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route.agency_id || 'MTC',
+        tripId: m.trip_id,
+        directionId: trip.direction_id,
+        serviceId: trip.service_id,
+        boardStopId: m.from_stop_id,
+        boardStopName: fromStopObj.stop_name,
+        boardStop: fromStopObj,
+        departureTime: m.depTime,
+        alightingStopId: m.to_stop_id,
+        alightingStopName: toStopObj.stop_name,
+        alightingStop: toStopObj,
+        arrivalTime: m.arrTime,
+        durationMinutes,
+        stopsCount: m.stopsCount,
+      };
+
+      allConstructedJourneys.push({
+        id: `direct-${m.trip_id}`,
+        type: 'direct',
+        transfers: 0,
+        origin: fromStopObj,
+        destination: toStopObj,
+        departureTime: m.depTime,
+        arrivalTime: m.arrTime,
+        totalDurationMinutes: durationMinutes,
+        waitingTimeMinutes: 0,
+        inVehicleDurationMinutes: durationMinutes,
+        legs: [leg],
+        transfersInfo: [],
+        departsInMinutes,
+        isUpcoming,
+        routeSummary: route.route_short_name || route.route_id,
+      });
+    }
+
+    // B. Add 1-Transfer Journeys
+    for (const c of candidate1Transfers) {
+      const trip1 = tripMap.get(c.leg1.trip_id);
+      const trip2 = tripMap.get(c.leg2.trip_id);
+      if (!trip1 || !trip2) continue;
+
+      const route1 = routeMap.get(trip1.route_id);
+      const route2 = routeMap.get(trip2.route_id);
+      if (!route1 || !route2) continue;
+
+      const originStopObj = stopsMap.get(c.leg1.from_stop_id) || representativeFromStop;
+      const transferStopObj = stopsMap.get(c.transfer_stop_id) || {
+        stop_id: c.transfer_stop_id,
+        stop_name: `Stop ${c.transfer_stop_id}`,
+        stop_lat: 0,
+        stop_lon: 0,
+      };
+      const destStopObj = stopsMap.get(c.leg2.to_stop_id) || representativeToStop;
+
+      const leg1Duration = calculateDurationMinutes(c.leg1.departure_time, c.leg1.arrival_time);
+      const leg2Duration = calculateDurationMinutes(c.leg2.departure_time, c.leg2.arrival_time);
+
+      const isUpcoming = c.leg1.departure_time >= currentTimeStr;
+      const departsInMinutes = isUpcoming ? calculateDurationMinutes(currentTimeStr, c.leg1.departure_time) : 0;
+
+      const leg1: JourneyLeg = {
+        legNumber: 1,
+        routeId: route1.route_id,
+        routeShortName: route1.route_short_name || route1.route_id,
+        routeLongName: route1.route_long_name || '',
+        routeType: route1.route_type ?? (route1.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route1.agency_id || 'MTC',
+        tripId: c.leg1.trip_id,
+        directionId: trip1.direction_id,
+        serviceId: trip1.service_id,
+        boardStopId: c.leg1.from_stop_id,
+        boardStopName: originStopObj.stop_name,
+        boardStop: originStopObj,
+        departureTime: c.leg1.departure_time,
+        alightingStopId: c.transfer_stop_id,
+        alightingStopName: transferStopObj.stop_name,
+        alightingStop: transferStopObj,
+        arrivalTime: c.leg1.arrival_time,
+        durationMinutes: leg1Duration,
+        stopsCount: c.leg1.stops_count,
+      };
+
+      const leg2: JourneyLeg = {
+        legNumber: 2,
+        routeId: route2.route_id,
+        routeShortName: route2.route_short_name || route2.route_id,
+        routeLongName: route2.route_long_name || '',
+        routeType: route2.route_type ?? (route2.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route2.agency_id || 'MTC',
+        tripId: c.leg2.trip_id,
+        directionId: trip2.direction_id,
+        serviceId: trip2.service_id,
+        boardStopId: c.transfer_stop_id,
+        boardStopName: transferStopObj.stop_name,
+        boardStop: transferStopObj,
+        departureTime: c.leg2.departure_time,
+        alightingStopId: c.leg2.to_stop_id,
+        alightingStopName: destStopObj.stop_name,
+        alightingStop: destStopObj,
+        arrivalTime: c.leg2.arrival_time,
+        durationMinutes: leg2Duration,
+        stopsCount: c.leg2.stops_count,
+      };
+
+      const transferWait: TransferWait = {
+        transferStopId: c.transfer_stop_id,
+        transferStopName: transferStopObj.stop_name,
+        waitMinutes: c.wait_minutes,
+        fromLegArrival: c.leg1.arrival_time,
+        toLegDeparture: c.leg2.departure_time,
+      };
+
+      allConstructedJourneys.push({
+        id: `transfer1-${c.leg1.trip_id}-${c.leg2.trip_id}`,
+        type: 'connecting',
+        transfers: 1,
+        origin: originStopObj,
+        destination: destStopObj,
+        departureTime: c.leg1.departure_time,
+        arrivalTime: c.leg2.arrival_time,
+        totalDurationMinutes: c.total_duration_minutes,
+        waitingTimeMinutes: c.wait_minutes,
+        inVehicleDurationMinutes: leg1Duration + leg2Duration,
+        legs: [leg1, leg2],
+        transfersInfo: [transferWait],
+        departsInMinutes,
+        isUpcoming,
+        routeSummary: `${route1.route_short_name || route1.route_id} → ${route2.route_short_name || route2.route_id}`,
+      });
+    }
+
+    // C. Add 2-Transfer Journeys
+    for (const c of candidate2Transfers) {
+      const trip1 = tripMap.get(c.leg1.trip_id);
+      const trip2 = tripMap.get(c.leg2.trip_id);
+      const trip3 = tripMap.get(c.leg3.trip_id);
+      if (!trip1 || !trip2 || !trip3) continue;
+
+      const route1 = routeMap.get(trip1.route_id);
+      const route2 = routeMap.get(trip2.route_id);
+      const route3 = routeMap.get(trip3.route_id);
+      if (!route1 || !route2 || !route3) continue;
+
+      const originStopObj = stopsMap.get(c.leg1.from_stop_id) || representativeFromStop;
+      const transfer1StopObj = stopsMap.get(c.transfer1_stop_id) || {
+        stop_id: c.transfer1_stop_id,
+        stop_name: `Stop ${c.transfer1_stop_id}`,
+        stop_lat: 0,
+        stop_lon: 0,
+      };
+      const transfer2StopObj = stopsMap.get(c.transfer2_stop_id) || {
+        stop_id: c.transfer2_stop_id,
+        stop_name: `Stop ${c.transfer2_stop_id}`,
+        stop_lat: 0,
+        stop_lon: 0,
+      };
+      const destStopObj = stopsMap.get(c.leg3.to_stop_id) || representativeToStop;
+
+      const leg1Duration = calculateDurationMinutes(c.leg1.departure_time, c.leg1.arrival_time);
+      const leg2Duration = calculateDurationMinutes(c.leg2.departure_time, c.leg2.arrival_time);
+      const leg3Duration = calculateDurationMinutes(c.leg3.departure_time, c.leg3.arrival_time);
+
+      const isUpcoming = c.leg1.departure_time >= currentTimeStr;
+      const departsInMinutes = isUpcoming ? calculateDurationMinutes(currentTimeStr, c.leg1.departure_time) : 0;
+
+      const leg1: JourneyLeg = {
+        legNumber: 1,
+        routeId: route1.route_id,
+        routeShortName: route1.route_short_name || route1.route_id,
+        routeLongName: route1.route_long_name || '',
+        routeType: route1.route_type ?? (route1.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route1.agency_id || 'MTC',
+        tripId: c.leg1.trip_id,
+        boardStopId: c.leg1.from_stop_id,
+        boardStopName: originStopObj.stop_name,
+        boardStop: originStopObj,
+        departureTime: c.leg1.departure_time,
+        alightingStopId: c.transfer1_stop_id,
+        alightingStopName: transfer1StopObj.stop_name,
+        alightingStop: transfer1StopObj,
+        arrivalTime: c.leg1.arrival_time,
+        durationMinutes: leg1Duration,
+        stopsCount: c.leg1.stops_count,
+      };
+
+      const leg2: JourneyLeg = {
+        legNumber: 2,
+        routeId: route2.route_id,
+        routeShortName: route2.route_short_name || route2.route_id,
+        routeLongName: route2.route_long_name || '',
+        routeType: route2.route_type ?? (route2.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route2.agency_id || 'MTC',
+        tripId: c.leg2.trip_id,
+        boardStopId: c.transfer1_stop_id,
+        boardStopName: transfer1StopObj.stop_name,
+        boardStop: transfer1StopObj,
+        departureTime: c.leg2.departure_time,
+        alightingStopId: c.transfer2_stop_id,
+        alightingStopName: transfer2StopObj.stop_name,
+        alightingStop: transfer2StopObj,
+        arrivalTime: c.leg2.arrival_time,
+        durationMinutes: leg2Duration,
+        stopsCount: c.leg2.stops_count,
+      };
+
+      const leg3: JourneyLeg = {
+        legNumber: 3,
+        routeId: route3.route_id,
+        routeShortName: route3.route_short_name || route3.route_id,
+        routeLongName: route3.route_long_name || '',
+        routeType: route3.route_type ?? (route3.agency_id === 'CMRL' ? 1 : 3),
+        agencyId: route3.agency_id || 'MTC',
+        tripId: c.leg3.trip_id,
+        boardStopId: c.transfer2_stop_id,
+        boardStopName: transfer2StopObj.stop_name,
+        boardStop: transfer2StopObj,
+        departureTime: c.leg3.departure_time,
+        alightingStopId: c.leg3.to_stop_id,
+        alightingStopName: destStopObj.stop_name,
+        alightingStop: destStopObj,
+        arrivalTime: c.leg3.arrival_time,
+        durationMinutes: leg3Duration,
+        stopsCount: c.leg3.stops_count,
+      };
+
+      allConstructedJourneys.push({
+        id: `transfer2-${c.leg1.trip_id}-${c.leg2.trip_id}-${c.leg3.trip_id}`,
+        type: 'connecting',
+        transfers: 2,
+        origin: originStopObj,
+        destination: destStopObj,
+        departureTime: c.leg1.departure_time,
+        arrivalTime: c.leg3.arrival_time,
+        totalDurationMinutes: c.total_duration_minutes,
+        waitingTimeMinutes: c.wait1_minutes + c.wait2_minutes,
+        inVehicleDurationMinutes: leg1Duration + leg2Duration + leg3Duration,
+        legs: [leg1, leg2, leg3],
+        transfersInfo: [
+          {
+            transferStopId: c.transfer1_stop_id,
+            transferStopName: transfer1StopObj.stop_name,
+            waitMinutes: c.wait1_minutes,
+            fromLegArrival: c.leg1.arrival_time,
+            toLegDeparture: c.leg2.departure_time,
+          },
+          {
+            transferStopId: c.transfer2_stop_id,
+            transferStopName: transfer2StopObj.stop_name,
+            waitMinutes: c.wait2_minutes,
+            fromLegArrival: c.leg2.arrival_time,
+            toLegDeparture: c.leg3.departure_time,
+          },
+        ],
+        departsInMinutes,
+        isUpcoming,
+        routeSummary: `${route1.route_short_name || route1.route_id} → ${route2.route_short_name || route2.route_id} → ${route3.route_short_name || route3.route_id}`,
+      });
+    }
+
+    // 12. PARETO DOMINATION & FILTERING
+    // Journey A dominates Journey B if:
+    // A departs no earlier, arrives no later, uses no more transfers, and takes no longer duration
+    const nonDominatedJourneys = allConstructedJourneys.filter((candidate, _idx, arr) => {
+      const cDep = parseGTFSSeconds(candidate.departureTime);
+      const cArr = parseGTFSSeconds(candidate.arrivalTime);
+      const cTrans = candidate.transfers;
+      const cDur = candidate.totalDurationMinutes;
+
+      for (const o of arr) {
+        if (o.id === candidate.id) continue;
+        const oDep = parseGTFSSeconds(o.departureTime);
+        const oArr = parseGTFSSeconds(o.arrivalTime);
+        const oTrans = o.transfers;
+        const oDur = o.totalDurationMinutes;
+
+        const noWorse = oDep >= cDep && oArr <= cArr && oTrans <= cTrans && oDur <= cDur;
+        const strictlyBetter = oDep > cDep || oArr < cArr || oTrans < cTrans || oDur < cDur;
+
+        // If another option is strictly superior in every single metric, filter out this candidate
+        if (noWorse && strictlyBetter) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Sort non-dominated journeys:
+    // 1. Upcoming departures first
+    // 2. Earliest departure time
+    // 3. Fewest transfers
+    // 4. Shortest duration
+    nonDominatedJourneys.sort((a, b) => {
+      if (a.isUpcoming && !b.isUpcoming) return -1;
+      if (!a.isUpcoming && b.isUpcoming) return 1;
+
+      const timeDiff = a.departureTime.localeCompare(b.departureTime);
+      if (timeDiff !== 0) return timeDiff;
+
+      const transDiff = a.transfers - b.transfers;
+      if (transDiff !== 0) return transDiff;
+
+      return a.totalDurationMinutes - b.totalDurationMinutes;
+    });
+
+    // Top recommended journeys
+    const directOnly = nonDominatedJourneys.filter((j) => j.type === 'direct').slice(0, 30);
+    const connectingOnly = nonDominatedJourneys.filter((j) => j.type === 'connecting').slice(0, 30);
+    const topJourneys = nonDominatedJourneys.slice(0, 30);
+
+    // 13. MAINTAIN BACKWARD COMPATIBILITY FOR JOURNEYMATCH AND GROUPEDROUTEJOURNEY
+    const allBuiltJourneys: JourneyMatch[] = [];
+    for (const m of validDirectMatches) {
+      const trip = tripMap.get(m.trip_id);
+      if (!trip) continue;
+      const route = routeMap.get(trip.route_id);
+      if (!route) continue;
+
+      const fromStopObj = stopsMap.get(m.from_stop_id) || representativeFromStop;
+      const toStopObj = stopsMap.get(m.to_stop_id) || representativeToStop;
       const durationMinutes = calculateDurationMinutes(m.depTime, m.arrTime);
       const isUpcoming = m.depTime >= currentTimeStr;
       const departsInMinutes = isUpcoming ? calculateDurationMinutes(currentTimeStr, m.depTime) : 0;
@@ -1584,7 +2382,6 @@ export async function findDirectJourneys(
       });
     }
 
-    // 12. Group services by route_id
     const routeGroupMap = new Map<string, JourneyMatch[]>();
     for (const j of allBuiltJourneys) {
       if (!routeGroupMap.has(j.route.route_id)) {
@@ -1594,15 +2391,11 @@ export async function findDirectJourneys(
     }
 
     const groupedJourneys: GroupedRouteJourney[] = [];
-
     for (const [routeId, trips] of routeGroupMap.entries()) {
-      // Sort all trips for this route chronologically
       trips.sort((a, b) => a.departure_time.localeCompare(b.departure_time));
-
       const upcoming = trips.filter((t) => t.is_upcoming);
       const nextDeparture = upcoming.length > 0 ? upcoming[0] : trips[0];
       const subsequent = upcoming.length > 1 ? upcoming.slice(1, 5) : [];
-
       const shortestDuration = Math.min(...trips.map((t) => t.duration_minutes));
       const minStops = Math.min(...trips.map((t) => t.stops_count));
 
@@ -1622,14 +2415,9 @@ export async function findDirectJourneys(
       });
     }
 
-    // 13. Sort grouped journeys:
-    // PRIMARY: Earliest upcoming departure from the origin stop
-    // SECONDARY: Shortest scheduled duration
-    // TERTIARY: Total service frequency today
     groupedJourneys.sort((a, b) => {
       const aNext = a.nextScheduledDeparture;
       const bNext = b.nextScheduledDeparture;
-
       if (aNext?.is_upcoming && bNext?.is_upcoming) {
         const timeDiff = aNext.departure_time.localeCompare(bNext.departure_time);
         if (timeDiff !== 0) return timeDiff;
@@ -1639,14 +2427,11 @@ export async function findDirectJourneys(
       }
       if (aNext?.is_upcoming && !bNext?.is_upcoming) return -1;
       if (!aNext?.is_upcoming && bNext?.is_upcoming) return 1;
-
-      // Both past: order by first departure
       const aFirst = a.allTripsToday[0]?.departure_time || '99:99';
       const bFirst = b.allTripsToday[0]?.departure_time || '99:99';
       return aFirst.localeCompare(bFirst);
     });
 
-    // Also sort flat journeys
     allBuiltJourneys.sort((a, b) => {
       if (a.is_upcoming && !b.is_upcoming) return -1;
       if (!a.is_upcoming && b.is_upcoming) return 1;
@@ -1656,21 +2441,39 @@ export async function findDirectJourneys(
     return {
       journeys: allBuiltJourneys,
       groupedJourneys,
+      multiLegJourneys: topJourneys,
+      directJourneys: directOnly,
+      connectingJourneys: connectingOnly,
       fromStop: representativeFromStop,
       toStop: representativeToStop,
       error: null,
     };
   } catch (err: any) {
-    console.error('[findDirectJourneys exception]:', err);
+    console.error('[findTransitJourneys exception]:', err);
     return {
       journeys: [],
       groupedJourneys: [],
+      multiLegJourneys: [],
+      directJourneys: [],
+      connectingJourneys: [],
       fromStop: null,
       toStop: null,
       error: err?.message || 'Journey search failed',
     };
   }
 }
+
+/**
+ * Find Direct Bus/Transit Journeys between Stop A and Stop B.
+ * Fully preserves backwards compatibility while returning multiLegJourneys.
+ */
+export async function findDirectJourneys(
+  fromParam: string | string[] | { stopIds: string[] } | { stop_id: string },
+  toParam: string | string[] | { stopIds: string[] } | { stop_id: string }
+): Promise<TransitRoutingResult> {
+  return findTransitJourneys(fromParam, toParam);
+}
+
 
 /**
  * Fetch the complete step-by-step journey for a trip between origin and destination

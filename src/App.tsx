@@ -13,6 +13,7 @@ import { AboutPage } from './components/pages/AboutPage';
 import { PrivacyPolicyPage } from './components/pages/PrivacyPolicyPage';
 import { TermsPage } from './components/pages/TermsPage';
 import { TestPage } from './components/pages/TestPage';
+import { LoginPage } from './components/pages/LoginPage';
 import { Footer } from './components/Footer';
 
 export default function App() {
@@ -23,7 +24,7 @@ export default function App() {
     loading,
   } = transitData;
 
-  const [currentPage, setCurrentPage] = useState<PageView>('home');
+  const [currentPage, setCurrentPage] = useState<PageView>('login');
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
@@ -57,18 +58,27 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-black selection:bg-black selection:text-white antialiased flex flex-col justify-between font-sans">
-      {/* Floating Glassmorphism Header with Integrated Search */}
-      <Header
-        currentPage={currentPage}
-        onNavigate={handleNavigate}
-        isMenuOpen={isMenuOpen}
-        setIsMenuOpen={setIsMenuOpen}
-        onSelectRouteId={handleSelectRouteById}
-        onSelectRoute={(route) => handleSelectRouteById(route.route_id)}
-      />
+      {/* Floating Glassmorphism Header with Integrated Search (active on transit pages) */}
+      {currentPage !== 'login' && (
+        <Header
+          currentPage={currentPage}
+          onNavigate={handleNavigate}
+          isMenuOpen={isMenuOpen}
+          setIsMenuOpen={setIsMenuOpen}
+          onSelectRouteId={handleSelectRouteById}
+          onSelectRoute={(route) => handleSelectRouteById(route.route_id)}
+        />
+      )}
 
       {/* Main Page View Routing */}
       <main className="flex-1">
+        {currentPage === 'login' && (
+          <LoginPage
+            onLoginSuccess={() => handleNavigate('home')}
+            onExploreAsGuest={() => handleNavigate('home')}
+          />
+        )}
+
         {currentPage === 'home' && (
           <EditorialHome
             onNavigate={handleNavigate}
@@ -144,7 +154,7 @@ export default function App() {
       </main>
 
       {/* MadrasMacha Footer on subpages */}
-      {currentPage !== 'home' && (
+      {currentPage !== 'home' && currentPage !== 'login' && (
         <Footer onNavigate={handleNavigate} />
       )}
     </div>

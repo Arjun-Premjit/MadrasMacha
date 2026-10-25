@@ -1,0 +1,22 @@
+[
+  {
+    "id": "usr_seed_001",
+    "username": "chennaimacha",
+    "fullName": "Chennai Commuter",
+    "salt": "627b5d5f43b83997b1ed610593c9a034",
+    "passwordHash": "f95df07798dd6032eb10cfa431ef1fa39b5f9d407df0648eaa8f09f2d080fa392670971281bcaf046736e81ba8740b631935052406930c522df96caf358a3017",
+    "createdAt": "2026-10-20T08:06:32.124Z",
+    "updatedAt": "2026-10-20T08:06:32.124Z",
+    "lastLoginAt": "2026-10-20T08:06:37.771Z"
+  },
+  {
+    "id": "usr_1792483601385_f98ed3",
+    "username": "arjun_commuter",
+    "fullName": "Arjun Commuter",
+    "salt": "7f454809b097b33116e63e7d8941d529",
+    "passwordHash": "5ab42b7a7f9eb44c85b6ce1f4c2107199d61371eb7f0f2faea192b19773a7d38485a21e207859308607c3ee1d699c9f610edbdb87c0584aaaeb031ad124f4c6a",
+    "createdAt": "2026-10-20T08:06:41.385Z",
+    "updatedAt": "2026-10-20T08:06:41.385Z",
+    "lastLoginAt": "2026-10-20T08:06:41.385Z"
+  }
+]

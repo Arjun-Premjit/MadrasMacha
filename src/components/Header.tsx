@@ -17,7 +17,7 @@ import { searchTransitViaRest, TransitSearchResult } from '../../lib/supabase/ap
 import { LanguageToggle } from './LanguageToggle';
 import { useLanguage } from '../hooks/useLanguage';
 
-export type PageView = 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'fare' | 'about' | 'privacy' | 'terms' | 'test';
+export type PageView = 'login' | 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'fare' | 'about' | 'privacy' | 'terms' | 'test';
 
 interface HeaderProps {
   currentPage: PageView;

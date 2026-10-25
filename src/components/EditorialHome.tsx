@@ -2,10 +2,11 @@ import React from 'react';
 import { MtcBus3D } from './MtcBus3D';
 import { MetroTrain3D } from './MetroTrain3D';
 import { PageView } from './Header';
-import { ArrowRight, Bus, Train, Ticket, Radio, Languages } from 'lucide-react';
+import { ArrowRight, Bus, Train, Ticket, Radio, Languages, User } from 'lucide-react';
 import { Footer } from './Footer';
 import { JourneyPlanner } from './JourneyPlanner';
 import { useLanguage } from '../hooks/useLanguage';
+import { useAuth } from '../hooks/useAuth';
 
 interface EditorialHomeProps {
   onNavigate: (page: PageView) => void;
@@ -19,6 +20,7 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
   onSelectStop,
 }) => {
   const { language, setLanguage } = useLanguage();
+  const { user } = useAuth();
 
   return (
     <div className="relative w-full bg-[#FAFAFA] text-black overflow-x-hidden font-sans">
@@ -37,7 +39,7 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
         </p>
 
         {/* New Production Feature Highlights */}
-        <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-3xl text-left">
+        <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 w-full max-w-4xl text-left">
           {/* Feature 1: Bilingual Toggle Card */}
           <div
             onClick={() => setLanguage(language === 'en' ? 'ta' : 'en')}
@@ -98,6 +100,33 @@ export const EditorialHome: React.FC<EditorialHomeProps> = ({
             </h3>
             <p className="text-[11px] text-neutral-500 mt-0.5">
               {language === 'ta' ? 'CUMTA திறந்தநிலை நேரடி தரவு' : 'Verified CUMTA open realtime feed'}
+            </p>
+          </div>
+
+          {/* Feature 4: User Account / Backend Login Card */}
+          <div
+            onClick={() => onNavigate('login')}
+            className="p-4 rounded-2xl bg-white border border-neutral-200/90 shadow-2xs hover:shadow-sm hover:border-black/20 transition-all cursor-pointer group"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="w-8 h-8 rounded-xl bg-neutral-100 text-neutral-800 flex items-center justify-center font-bold">
+                <User className="w-4 h-4" />
+              </div>
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                user ? 'bg-emerald-100 text-emerald-800' : 'bg-neutral-100 text-neutral-700'
+              }`}>
+                {user ? 'Active' : 'Backend DB'}
+              </span>
+            </div>
+            <h3 className="text-xs font-bold text-neutral-900 group-hover:text-black">
+              {user
+                ? user.username
+                : (language === 'ta' ? 'பயனர் உள்நுழைவு' : 'User Login & Account')}
+            </h3>
+            <p className="text-[11px] text-neutral-500 mt-0.5">
+              {user
+                ? (language === 'ta' ? 'பின்அலுவலக கணக்கு செயலில் உள்ளது' : 'Logged in, credentials stored in backend')
+                : (language === 'ta' ? 'பயனர்பெயர் & கடவுச்சொல் சேமிப்பு' : 'Store username & password in backend')}
             </p>
           </div>
         </div>

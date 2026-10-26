@@ -1,0 +1,18 @@
+[
+  {
+    "id": "a0000000-0000-0000-0000-000000000001",
+    "title": "Anna Salai Metro Corridor Track Maintenance",
+    "description": "Scheduled maintenance between Nandanam and Guindy stations. 10-minute headway in effect.",
+    "severity": "warning",
+    "route_id": "CMRL_1",
+    "affected_stations": [
+      "Nandanam",
+      "Saidapet",
+      "Little Mount",
+      "Guindy"
+    ],
+    "active": true,
+    "created_at": "2026-10-26T17:55:48.810Z",
+    "updated_at": "2026-10-26T17:55:48.810Z"
+  }
+]

@@ -11,6 +11,9 @@ import {
   Info,
   Database,
   Ticket,
+  LogOut,
+  Shield,
+  Bell,
 } from 'lucide-react';
 import { Route } from '../types/transit';
 import { searchTransitViaRest, TransitSearchResult } from '../../lib/supabase/api';
@@ -19,6 +22,15 @@ import { useLanguage } from '../hooks/useLanguage';
 
 export type PageView = 'login' | 'home' | 'routes' | 'route-detail' | 'stops' | 'stop-detail' | 'mtc' | 'metro' | 'fare' | 'about' | 'privacy' | 'terms' | 'test';
 
+export interface HeaderUser {
+  id: string;
+  email: string;
+  username: string;
+  fullName?: string;
+  role: 'commuter' | 'transit_admin';
+  mfaEnabled: boolean;
+}
+
 interface HeaderProps {
   currentPage: PageView;
   onNavigate: (page: PageView) => void;
@@ -26,6 +38,8 @@ interface HeaderProps {
   setIsMenuOpen: (open: boolean) => void;
   onSelectRoute?: (route: Route) => void;
   onSelectRouteId?: (routeId: string) => void;
+  currentUser?: HeaderUser | null;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -35,6 +49,8 @@ export const Header: React.FC<HeaderProps> = ({
   setIsMenuOpen,
   onSelectRoute,
   onSelectRouteId,
+  currentUser,
+  onLogout,
 }) => {
   const { language, t } = useLanguage();
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -265,6 +281,41 @@ export const Header: React.FC<HeaderProps> = ({
                 );
               })}
             </div>
+
+            {/* Authenticated User Status & Logout */}
+            {currentUser && (
+              <div className="mt-3 pt-2.5 border-t border-black/5 px-2">
+                <div className="flex items-center justify-between p-2 rounded-xl bg-black/5 mb-2">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <div className="w-6 h-6 rounded-full bg-black text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                      {currentUser.username.substring(0, 2).toUpperCase()}
+                    </div>
+                    <div className="overflow-hidden">
+                      <div className="text-xs font-bold text-neutral-900 truncate">
+                        {currentUser.fullName || currentUser.username}
+                      </div>
+                      <div className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider flex items-center gap-1">
+                        <span className={`w-1.5 h-1.5 rounded-full ${currentUser.role === 'transit_admin' ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                        {currentUser.role === 'transit_admin' ? 'Transit Admin' : 'Commuter'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {onLogout && (
+                  <button
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onLogout();
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-neutral-100 hover:bg-red-50 text-neutral-700 hover:text-red-700 text-xs font-semibold transition cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Sign Out</span>
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Micro footer inside menu */}
             <div className="mt-3 pt-2.5 border-t border-black/5 px-2 text-center text-[10px] text-neutral-400">

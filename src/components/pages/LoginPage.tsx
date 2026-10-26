@@ -3,126 +3,256 @@ import {
   Eye,
   EyeOff,
   ArrowRight,
-  Info,
+  ShieldCheck,
   ShieldAlert,
   Loader2,
-  CheckCircle2,
   Sparkles,
+  QrCode,
+  KeyRound,
+  Lock,
+  Mail,
+  User,
+  ArrowLeft,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { useLanguage } from '../../hooks/useLanguage';
 import { LanguageToggle } from '../LanguageToggle';
 
-interface LoginPageProps {
-  onLoginSuccess: () => void;
-  onExploreAsGuest?: () => void;
+export interface AuthUser {
+  id: string;
+  email: string;
+  username: string;
+  fullName?: string;
+  role: 'commuter' | 'transit_admin';
+  mfaEnabled: boolean;
 }
 
-export const LoginPage: React.FC<LoginPageProps> = ({
-  onLoginSuccess,
-  onExploreAsGuest,
-}) => {
+interface LoginPageProps {
+  onLoginSuccess: (token: string, user: AuthUser) => void;
+}
+
+type AuthMode = 'login' | 'register' | 'mfa_verify' | 'mfa_enroll';
+
+export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   const { language } = useLanguage();
 
-  // Form states (in-memory only, never persisted to localStorage or sessionStorage)
+  // Mode state: 'login' | 'register' | 'mfa_verify' | 'mfa_enroll'
+  const [mode, setMode] = useState<AuthMode>('login');
+
+  // Input states
+  const [identifier, setIdentifier] = useState('');
   const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
-  const [rememberMe, setRememberMe] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
 
-  // Validation & UI states
-  const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+  // MFA Challenge State
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  const [manualKey, setManualKey] = useState<string | null>(null);
+
+  // UI status
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [noticeMessage, setNoticeMessage] = useState<{
-    type: 'auth_pending' | 'forgot_password' | 'create_account';
-    text: string;
-  } | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
-  // Email format validator
-  const isValidEmail = (val: string): boolean => {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim());
+  // Clear messages on input
+  const clearMessages = () => {
+    if (errorMessage) setErrorMessage(null);
+    if (infoMessage) setInfoMessage(null);
   };
 
-  const handleEmailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setEmail(e.target.value);
-    if (errors.email) {
-      setErrors((prev) => ({ ...prev, email: undefined }));
-    }
-  };
-
-  const handlePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setPassword(e.target.value);
-    if (errors.password) {
-      setErrors((prev) => ({ ...prev, password: undefined }));
-    }
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
+  // ─────────────────────────────────────────────────────────────
+  // 1. LOGIN SUBMISSION (PASSWORD VERIFICATION STEP)
+  // ─────────────────────────────────────────────────────────────
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    clearMessages();
 
-    const newErrors: { email?: string; password?: string } = {};
-
-    if (!email.trim()) {
-      newErrors.email =
+    if (!identifier.trim() || !password) {
+      setErrorMessage(
         language === 'ta'
-          ? 'மின்னஞ்சல் முகவரியை உள்ளிடவும்.'
-          : 'Please enter your email address.';
-    } else if (!isValidEmail(email)) {
-      newErrors.email =
-        language === 'ta'
-          ? 'சரியான மின்னஞ்சல் முகவரியை உள்ளிடவும் (எ.கா. user@example.com).'
-          : 'Please enter a valid email address (e.g. user@example.com).';
-    }
-
-    if (!password) {
-      newErrors.password =
-        language === 'ta'
-          ? 'கடவுச்சொல்லை உள்ளிடவும்.'
-          : 'Please enter your password.';
-    }
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
+          ? 'மின்னஞ்சல்/பயனர்பெயர் மற்றும் கடவுச்சொல்லை உள்ளிடவும்.'
+          : 'Please enter your email/username and password.'
+      );
       return;
     }
 
-    // Input is valid: Simulate client-side UI processing while strictly NOT persisting credentials
     setIsSubmitting(true);
-    setErrors({});
-
-    setTimeout(() => {
-      setIsSubmitting(false);
-      // Explicitly notify that backend authentication is not yet connected
-      setNoticeMessage({
-        type: 'auth_pending',
-        text:
-          language === 'ta'
-            ? 'படிவம் வெற்றிகரமாக சரிபார்க்கப்பட்டது. இந்த கட்டத்தில் பின்தள அங்கீகாரம் (Backend Authentication) இன்னும் இணைக்கப்படவில்லை. உங்கள் கடவுச்சொல் சேமிக்கப்படவில்லை.'
-            : 'Form inputs validated successfully. Backend authentication has not yet been connected in this development stage. Your credentials were not stored or transmitted.',
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: identifier.trim(), password }),
       });
-    }, 450);
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setErrorMessage(data.error || 'Authentication failed. Please verify your credentials.');
+        return;
+      }
+
+      // Password verified -> Server requires MFA
+      setMfaToken(data.mfaToken);
+
+      if (data.mfaEnrollmentRequired) {
+        setQrCodeDataUrl(data.qrCode);
+        setManualKey(data.manualKey);
+        setMode('mfa_enroll');
+        setInfoMessage(
+          language === 'ta'
+            ? 'அங்கீகாரப் பயன்பாட்டை (Google/Microsoft Authenticator) ஸ்கேன் செய்து 6-இலக்கக் குறியீட்டை உள்ளிடவும்.'
+            : 'Scan the QR code with Google/Microsoft Authenticator to complete MFA setup.'
+        );
+      } else {
+        setMode('mfa_verify');
+        setInfoMessage(
+          language === 'ta'
+            ? 'உங்கள் அங்கீகாரப் பயன்பாட்டிலிருந்து 6-இலக்கக் குறியீட்டை உள்ளிடவும்.'
+            : 'Please enter the 6-digit verification code from your authenticator app.'
+        );
+      }
+    } catch (err: any) {
+      setErrorMessage(
+        language === 'ta'
+          ? 'சேவையகத்தை அணுக முடியவில்லை. உங்கள் இணைப்பைச் சரிபார்க்கவும்.'
+          : 'Unable to reach authentication server. Please check your network connection.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleForgotPassword = (e: React.MouseEvent) => {
+  // ─────────────────────────────────────────────────────────────
+  // 2. REGISTRATION SUBMISSION (CREATES COMMUTER ACCOUNT + MFA)
+  // ─────────────────────────────────────────────────────────────
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setNoticeMessage({
-      type: 'forgot_password',
-      text:
+    clearMessages();
+
+    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setErrorMessage(
         language === 'ta'
-          ? 'கடவுச்சொல் மீட்பு சேவை இன்னும் இணைக்கப்படவில்லை. பின்தள அங்கீகாரம் ஒருங்கிணைக்கப்பட்ட பிறகு இது கிடைக்கும்.'
-          : 'Password recovery is not yet connected. This service will be enabled once backend authentication is integrated.',
-    });
+          ? 'சரியான மின்னஞ்சல் முகவரியை உள்ளிடவும்.'
+          : 'Please enter a valid email address.'
+      );
+      return;
+    }
+
+    if (!username.trim() || !/^[a-zA-Z0-9_-]{3,30}$/.test(username.trim())) {
+      setErrorMessage(
+        language === 'ta'
+          ? 'பயனர்பெயர் 3 முதல் 30 எழுத்துகள் வரை இருக்க வேண்டும் (எழுத்துக்கள், எண்கள் மட்டும்).'
+          : 'Username must be 3-30 alphanumeric characters.'
+      );
+      return;
+    }
+
+    if (!password || password.length < 8) {
+      setErrorMessage(
+        language === 'ta'
+          ? 'கடவுச்சொல் குறைந்தது 8 எழுத்துக்கள் கொண்டதாக இருக்க வேண்டும்.'
+          : 'Password must be at least 8 characters long.'
+      );
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email.trim(),
+          username: username.trim(),
+          fullName: fullName.trim(),
+          password,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setErrorMessage(data.error || 'Registration failed. Please choose another username/email.');
+        return;
+      }
+
+      // Registration successful -> immediately switch to MFA enrolment
+      setMfaToken(data.mfaToken);
+      setQrCodeDataUrl(data.qrCode);
+      setManualKey(data.manualKey);
+      setMode('mfa_enroll');
+      setInfoMessage(
+        language === 'ta'
+          ? 'கணக்கு உருவாக்கப்பட்டது! உங்கள் கணக்கைப் பாதுகாக்க அங்கீகாரப் பயன்பாட்டை ஸ்கேன் செய்யவும்.'
+          : 'Account created! Scan the QR code to connect your authenticator app.'
+      );
+    } catch (err: any) {
+      setErrorMessage('Unable to complete registration. Please check server connection.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleCreateAccount = (e: React.MouseEvent) => {
+  // ─────────────────────────────────────────────────────────────
+  // 3. TOTP CODE VERIFICATION (COMPLETES REAL LOGIN/ENROLMENT)
+  // ─────────────────────────────────────────────────────────────
+  const handleTotpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setNoticeMessage({
-      type: 'create_account',
-      text:
+    clearMessages();
+
+    const cleanCode = totpCode.trim().replace(/\s+/g, '');
+    if (!cleanCode || cleanCode.length !== 6 || !/^\d{6}$/.test(cleanCode)) {
+      setErrorMessage(
         language === 'ta'
-          ? 'புதிய பயனர் பதிவு சேவை இன்னும் இணைக்கப்படவில்லை. பின்தள அங்கீகாரம் ஒருங்கிணைக்கப்பட்ட பிறகு இது கிடைக்கும்.'
-          : 'User registration is not yet connected. This service will be enabled once backend authentication is integrated.',
-    });
+          ? 'சரியான 6-இலக்க அங்கீகாரக் குறியீட்டை உள்ளிடவும்.'
+          : 'Please enter a valid 6-digit numerical code.'
+      );
+      return;
+    }
+
+    if (!mfaToken) {
+      setErrorMessage('Session expired. Please restart login.');
+      setMode('login');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/mfa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mfaToken, code: cleanCode }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setErrorMessage(data.error || 'Invalid or expired 6-digit code. Please verify time synchronization.');
+        return;
+      }
+
+      // Real server-side authentication complete!
+      localStorage.setItem('mm_session_token', data.token);
+      onLoginSuccess(data.token, data.user);
+    } catch (err: any) {
+      setErrorMessage('Failed to verify authenticator code. Please check server connectivity.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const copyManualKey = () => {
+    if (manualKey) {
+      navigator.clipboard.writeText(manualKey);
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    }
   };
 
   return (
@@ -138,7 +268,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               Madras Macha
             </span>
             <span className="text-[11px] text-neutral-500 font-medium hidden sm:inline">
-              Chennai Unified Transit Platform
+              Chennai Unified Transit Platform &bull; Security Hardened (DA 3)
             </span>
           </div>
         </div>
@@ -148,16 +278,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         </div>
       </header>
 
-      {/* Main Login Container */}
+      {/* Main Auth Container */}
       <main className="flex-1 flex items-center justify-center px-4 sm:px-6 py-8">
         <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
           
-          {/* Left Column: Transit Illustration & Visual Identity */}
+          {/* Left Column: Visual Identity & Transit Schematic */}
           <div className="hidden lg:flex lg:col-span-5 flex-col justify-between p-8 rounded-3xl bg-white border border-neutral-200/90 shadow-xs h-full min-h-[520px]">
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-100 border border-neutral-200 text-[11px] font-bold text-neutral-800 mb-6">
-                <Sparkles className="w-3.5 h-3.5 text-neutral-900" />
-                <span>Chennai Public Transit</span>
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Bcrypt + TOTP MFA Secured</span>
               </div>
 
               <h2 className="text-3xl font-black tracking-tight text-neutral-900 leading-tight">
@@ -169,8 +299,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
               <p className="mt-6 text-xs text-neutral-500 leading-relaxed">
                 {language === 'ta'
-                  ? 'சென்னை மாநகர பேருந்துகள் (MTC) மற்றும் சென்னை மெட்ரோ ரயில் வழித்தடங்களுக்கான துல்லியமான வழிசெலுத்தல் மற்றும் கட்டண தகவல் தளம்.'
-                  : 'Comprehensive real-time schedules, corridor stops, live GTFS-RT tracking, and official fare rules for MTC buses and Chennai Metro Rail.'}
+                  ? 'சென்னை மாநகர பேருந்துகள் (MTC) மற்றும் சென்னை மெட்ரோ ரயில் பயணங்களுக்கான பாதுகாப்பான தளம். இரட்டை அடுக்கு அங்கீகாரம் (MFA) செயல்படுத்தப்பட்டுள்ளது.'
+                  : 'Chennai public transit platform protected with salted bcrypt password storage, AES-256-GCM encrypted TOTP authenticator MFA, and role-based access control.'}
               </p>
             </div>
 
@@ -181,46 +311,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <span className="text-[10px] font-mono text-neutral-400">CMRL &bull; MTC</span>
               </div>
 
-              {/* Transit Line SVG Motif */}
               <svg viewBox="0 0 320 120" className="w-full h-auto" aria-hidden="true">
-                {/* Blue Metro Line */}
-                <path
-                  d="M 20 30 L 120 30 L 180 80 L 300 80"
-                  fill="none"
-                  stroke="#2563EB"
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                />
-                {/* Green Metro Line */}
-                <path
-                  d="M 20 80 L 120 80 L 180 30 L 300 30"
-                  fill="none"
-                  stroke="#059669"
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                />
-                {/* MTC Bus Accent Line */}
-                <path
-                  d="M 20 55 L 300 55"
-                  fill="none"
-                  stroke="#D97706"
-                  strokeWidth="2"
-                  strokeDasharray="4 4"
-                  strokeLinecap="round"
-                />
-
-                {/* Stations */}
+                <path d="M 20 30 L 120 30 L 180 80 L 300 80" fill="none" stroke="#2563EB" strokeWidth="4" strokeLinecap="round" />
+                <path d="M 20 80 L 120 80 L 180 30 L 300 30" fill="none" stroke="#059669" strokeWidth="4" strokeLinecap="round" />
+                <path d="M 20 55 L 300 55" fill="none" stroke="#D97706" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round" />
                 <circle cx="20" cy="30" r="5" fill="#FFFFFF" stroke="#2563EB" strokeWidth="3" />
                 <circle cx="120" cy="30" r="5" fill="#FFFFFF" stroke="#2563EB" strokeWidth="3" />
                 <circle cx="180" cy="80" r="5" fill="#FFFFFF" stroke="#2563EB" strokeWidth="3" />
                 <circle cx="300" cy="80" r="5" fill="#FFFFFF" stroke="#2563EB" strokeWidth="3" />
-
                 <circle cx="20" cy="80" r="5" fill="#FFFFFF" stroke="#059669" strokeWidth="3" />
                 <circle cx="120" cy="80" r="5" fill="#FFFFFF" stroke="#059669" strokeWidth="3" />
                 <circle cx="180" cy="30" r="5" fill="#FFFFFF" stroke="#059669" strokeWidth="3" />
                 <circle cx="300" cy="30" r="5" fill="#FFFFFF" stroke="#059669" strokeWidth="3" />
-
-                {/* Interchange Central Station Node */}
                 <circle cx="150" cy="55" r="7" fill="#000000" stroke="#FFFFFF" strokeWidth="2" />
               </svg>
 
@@ -232,23 +334,23 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block" /> Green Line
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> MTC Corridors
+                  <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> MTC Bus
                 </span>
               </div>
             </div>
 
             <div className="pt-4 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500">
-              <span>Direct access to 600+ corridors</span>
-              <span className="font-semibold text-neutral-800">CUMTA GTFS Feed</span>
+              <span>Security Tier: DA 3 Question 2</span>
+              <span className="font-semibold text-neutral-800">RBAC Enabled</span>
             </div>
           </div>
 
-          {/* Right Column: Form Card */}
+          {/* Right Column: Interactive Multi-Step Authentication Card */}
           <div className="lg:col-span-7 max-w-lg mx-auto w-full">
             <div className="bg-white rounded-3xl border border-neutral-200/90 p-7 sm:p-10 shadow-xs">
               
               {/* Card Header */}
-              <div className="mb-8">
+              <div className="mb-6">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-xs font-bold tracking-wider uppercase text-neutral-500">
                     Madras Macha
@@ -258,237 +360,428 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     Your city. Your route. Your journey.
                   </span>
                 </div>
+
                 <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
-                  {language === 'ta' ? 'மீண்டும் வருக' : 'Welcome back'}
+                  {mode === 'login' && (language === 'ta' ? 'உள்நுழையவும்' : 'Welcome back')}
+                  {mode === 'register' && (language === 'ta' ? 'புதிய கணக்கு' : 'Create account')}
+                  {mode === 'mfa_enroll' && (language === 'ta' ? 'MFA அமைப்பு' : 'Set up Authenticator')}
+                  {mode === 'mfa_verify' && (language === 'ta' ? 'இரு காரணி சரிபார்ப்பு' : 'Two-Factor Verification')}
                 </h1>
                 <p className="text-xs sm:text-sm text-neutral-600 mt-1">
-                  {language === 'ta'
-                    ? 'உங்கள் சென்னை போக்குவரத்து அனுபவத்தைத் தொடர உள்நுழையவும்.'
-                    : 'Sign in to continue to your Chennai transit experience.'}
+                  {mode === 'login' && (language === 'ta' ? 'உங்கள் கணக்கில் பாதுகாப்பாக நுழையவும்.' : 'Sign in to access your Chennai transit account.')}
+                  {mode === 'register' && (language === 'ta' ? 'இலவச பயணியர் கணக்கை பதிவு செய்யவும்.' : 'Register a new commuter account.')}
+                  {mode === 'mfa_enroll' && (language === 'ta' ? 'QR குறியீட்டை ஸ்கேன் செய்து 6-இலக்கக் குறியீட்டை உள்ளிடவும்.' : 'Scan QR code with Google or Microsoft Authenticator.')}
+                  {mode === 'mfa_verify' && (language === 'ta' ? 'அங்கீகாரப் பயன்பாட்டிலிருந்து குறியீட்டை உள்ளிடவும்.' : 'Enter the 6-digit code from your authenticator app.')}
                 </p>
               </div>
 
-              {/* Informational Callout / Alert Box */}
-              {noticeMessage && (
+              {/* Informative / Error Callout Banner */}
+              {errorMessage && (
                 <div
-                  role="status"
-                  aria-live="polite"
-                  className={`mb-6 p-4 rounded-2xl border text-xs leading-relaxed transition-all ${
-                    noticeMessage.type === 'auth_pending'
-                      ? 'bg-amber-50/80 border-amber-200 text-amber-900'
-                      : 'bg-neutral-50 border-neutral-200 text-neutral-800'
-                  }`}
+                  role="alert"
+                  className="mb-5 p-4 rounded-2xl border border-red-200 bg-red-50/80 text-xs text-red-900 flex items-start gap-2.5 animate-in fade-in"
                 >
-                  <div className="flex items-start gap-2.5">
-                    {noticeMessage.type === 'auth_pending' ? (
-                      <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                    ) : (
-                      <Info className="w-4 h-4 text-neutral-600 shrink-0 mt-0.5" />
-                    )}
-                    <div className="flex-1">
-                      <div className="font-bold text-[13px] mb-1">
-                        {noticeMessage.type === 'auth_pending'
-                          ? language === 'ta'
-                            ? 'அங்கீகார சேவை இணைப்பு நிலுவையில் உள்ளது'
-                            : 'Authentication Pending Connection'
-                          : language === 'ta'
-                          ? 'அறிவிப்பு'
-                          : 'Notice'}
-                      </div>
-                      <p className="text-neutral-700">{noticeMessage.text}</p>
-
-                      {noticeMessage.type === 'auth_pending' && (
-                        <div className="mt-3">
-                          <button
-                            type="button"
-                            onClick={onLoginSuccess}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black text-white text-xs font-bold hover:bg-neutral-800 transition cursor-pointer shadow-xs"
-                          >
-                            <span>
-                              {language === 'ta'
-                                ? 'போக்குவரத்து வழிகாட்டியை ஆராயுங்கள் →'
-                                : 'Continue to Transit Guide →'}
-                            </span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                  <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="font-bold mb-0.5">Authentication Error</div>
+                    <p>{errorMessage}</p>
                   </div>
                 </div>
               )}
 
-              {/* Login Form */}
-              <form onSubmit={handleSubmit} noValidate className="space-y-5">
-                {/* Email Field */}
-                <div>
-                  <label
-                    htmlFor="login-email"
-                    className="block text-xs font-bold text-neutral-800 mb-1.5"
-                  >
-                    {language === 'ta' ? 'மின்னஞ்சல் முகவரி' : 'Email address'}
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="login-email"
-                      type="email"
-                      name="email"
-                      autoComplete="email"
-                      value={email}
-                      onChange={handleEmailChange}
-                      placeholder="name@example.com"
-                      aria-invalid={!!errors.email}
-                      aria-describedby={errors.email ? 'email-error' : undefined}
-                      disabled={isSubmitting}
-                      className={`w-full px-4 py-3 rounded-xl border text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white transition outline-none ${
-                        errors.email
-                          ? 'border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100'
-                          : 'border-neutral-200 focus:border-black focus:ring-2 focus:ring-black/5'
-                      }`}
-                    />
+              {infoMessage && (
+                <div
+                  role="status"
+                  className="mb-5 p-4 rounded-2xl border border-blue-200 bg-blue-50/80 text-xs text-blue-900 flex items-start gap-2.5 animate-in fade-in"
+                >
+                  <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="font-bold mb-0.5">MFA Step Required</div>
+                    <p>{infoMessage}</p>
                   </div>
-                  {errors.email && (
-                    <p
-                      id="email-error"
-                      className="mt-1.5 text-xs text-red-600 font-medium"
-                      role="alert"
-                    >
-                      {errors.email}
-                    </p>
-                  )}
                 </div>
+              )}
 
-                {/* Password Field */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label
-                      htmlFor="login-password"
-                      className="block text-xs font-bold text-neutral-800"
-                    >
+              {/* ─────────────────────────────────────────────────────────
+                  MODE 1: LOGIN FORM (EMAIL / USERNAME + PASSWORD)
+                  ───────────────────────────────────────────────────────── */}
+              {mode === 'login' && (
+                <form onSubmit={handleLoginSubmit} noValidate className="space-y-4">
+                  <div>
+                    <label htmlFor="auth-identifier" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      {language === 'ta' ? 'மின்னஞ்சல் அல்லது பயனர்பெயர்' : 'Email or Username'}
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="auth-identifier"
+                        type="text"
+                        autoComplete="username"
+                        value={identifier}
+                        onChange={(e) => {
+                          setIdentifier(e.target.value);
+                          clearMessages();
+                        }}
+                        placeholder="name@example.com or chennaimacha"
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="auth-password" className="block text-xs font-bold text-neutral-800 mb-1.5">
                       {language === 'ta' ? 'கடவுச்சொல்' : 'Password'}
                     </label>
+                    <div className="relative">
+                      <input
+                        id="auth-password"
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          clearMessages();
+                        }}
+                        placeholder="••••••••"
+                        disabled={isSubmitting}
+                        className="w-full pl-4 pr-11 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-700 transition cursor-pointer"
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
-                  <div className="relative">
-                    <input
-                      id="login-password"
-                      type={showPassword ? 'text' : 'password'}
-                      name="password"
-                      autoComplete="current-password"
-                      value={password}
-                      onChange={handlePasswordChange}
-                      placeholder="••••••••"
-                      aria-invalid={!!errors.password}
-                      aria-describedby={errors.password ? 'password-error' : undefined}
-                      disabled={isSubmitting}
-                      className={`w-full pl-4 pr-11 py-3 rounded-xl border text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white transition outline-none ${
-                        errors.password
-                          ? 'border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100'
-                          : 'border-neutral-200 focus:border-black focus:ring-2 focus:ring-black/5'
-                      }`}
-                    />
+
+                  <div className="pt-2">
                     <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
+                      type="submit"
                       disabled={isSubmitting}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-neutral-700 transition cursor-pointer"
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-black text-white text-sm font-bold hover:bg-neutral-800 disabled:opacity-60 transition cursor-pointer shadow-xs"
                     >
-                      {showPassword ? (
-                        <EyeOff className="w-4 h-4" />
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Verifying Credentials...</span>
+                        </>
                       ) : (
-                        <Eye className="w-4 h-4" />
+                        <>
+                          <span>Continue with Password</span>
+                          <ArrowRight className="w-4 h-4" />
+                        </>
                       )}
                     </button>
                   </div>
-                  {errors.password && (
-                    <p
-                      id="password-error"
-                      className="mt-1.5 text-xs text-red-600 font-medium"
-                      role="alert"
-                    >
-                      {errors.password}
+
+                  <div className="pt-4 border-t border-neutral-100 text-center">
+                    <p className="text-xs text-neutral-600">
+                      Don't have an account?{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearMessages();
+                          setMode('register');
+                        }}
+                        className="font-bold text-black hover:underline cursor-pointer ml-1"
+                      >
+                        Create commuter account
+                      </button>
                     </p>
-                  )}
-                </div>
+                  </div>
+                </form>
+              )}
 
-                {/* Controls Row: Remember Me & Forgot Password */}
-                <div className="flex items-center justify-between pt-1 text-xs">
-                  <label className="flex items-center gap-2 cursor-pointer select-none text-neutral-700">
+              {/* ─────────────────────────────────────────────────────────
+                  MODE 2: REGISTRATION FORM
+                  ───────────────────────────────────────────────────────── */}
+              {mode === 'register' && (
+                <form onSubmit={handleRegisterSubmit} noValidate className="space-y-4">
+                  <div>
+                    <label htmlFor="reg-email" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      Email address
+                    </label>
                     <input
-                      id="remember-me"
-                      type="checkbox"
-                      checked={rememberMe}
-                      onChange={(e) => setRememberMe(e.target.checked)}
+                      id="reg-email"
+                      type="email"
+                      autoComplete="email"
+                      value={email}
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        clearMessages();
+                      }}
+                      placeholder="commuter@example.com"
                       disabled={isSubmitting}
-                      className="w-4 h-4 rounded border-neutral-300 text-black focus:ring-black cursor-pointer accent-black"
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
                     />
-                    <span>{language === 'ta' ? 'என்னை நினைவில் கொள்' : 'Remember me'}</span>
-                  </label>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={handleForgotPassword}
-                    className="text-xs font-semibold text-neutral-700 hover:text-black hover:underline cursor-pointer"
-                  >
-                    {language === 'ta' ? 'கடவுச்சொல் மறந்துவிட்டதா?' : 'Forgot password?'}
-                  </button>
-                </div>
+                  <div>
+                    <label htmlFor="reg-username" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      Username (3-30 letters/numbers)
+                    </label>
+                    <input
+                      id="reg-username"
+                      type="text"
+                      autoComplete="username"
+                      value={username}
+                      onChange={(e) => {
+                        setUsername(e.target.value);
+                        clearMessages();
+                      }}
+                      placeholder="chennaicommuter"
+                      disabled={isSubmitting}
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
+                    />
+                  </div>
 
-                {/* Submit Sign In Button */}
-                <div className="pt-2">
+                  <div>
+                    <label htmlFor="reg-fullname" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      Full Name (Optional)
+                    </label>
+                    <input
+                      id="reg-fullname"
+                      type="text"
+                      autoComplete="name"
+                      value={fullName}
+                      onChange={(e) => {
+                        setFullName(e.target.value);
+                        clearMessages();
+                      }}
+                      placeholder="Arjun Premjit"
+                      disabled={isSubmitting}
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="reg-password" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      Password (min. 8 characters)
+                    </label>
+                    <input
+                      id="reg-password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={password}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        clearMessages();
+                      }}
+                      placeholder="••••••••••••"
+                      disabled={isSubmitting}
+                      className="w-full px-4 py-3 rounded-xl border border-neutral-200 text-sm text-neutral-900 placeholder:text-neutral-400 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none"
+                    />
+                  </div>
+
+                  <div className="pt-2">
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-black text-white text-sm font-bold hover:bg-neutral-800 disabled:opacity-60 transition cursor-pointer shadow-xs"
+                    >
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Creating Secure Account...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>Create Account &amp; Setup MFA</span>
+                          <ArrowRight className="w-4 h-4" />
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="pt-4 border-t border-neutral-100 text-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearMessages();
+                        setMode('login');
+                      }}
+                      className="text-xs font-semibold text-neutral-700 hover:text-black cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" /> Back to Sign in
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* ─────────────────────────────────────────────────────────
+                  MODE 3: TOTP ENROLMENT (QR CODE + VERIFICATION CODE)
+                  ───────────────────────────────────────────────────────── */}
+              {mode === 'mfa_enroll' && (
+                <form onSubmit={handleTotpSubmit} className="space-y-5">
+                  <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 text-center">
+                    <p className="text-xs font-semibold text-neutral-700 mb-3">
+                      1. Scan this QR code with Google Authenticator or Microsoft Authenticator:
+                    </p>
+                    {qrCodeDataUrl ? (
+                      <div className="flex justify-center mb-3">
+                        <img
+                          src={qrCodeDataUrl}
+                          alt="TOTP QR Code for Authenticator App"
+                          className="w-44 h-44 rounded-xl border border-neutral-200 shadow-2xs bg-white p-2"
+                        />
+                      </div>
+                    ) : (
+                      <div className="w-44 h-44 mx-auto flex items-center justify-center bg-white rounded-xl border text-xs text-neutral-400">
+                        Generating QR Code...
+                      </div>
+                    )}
+
+                    {manualKey && (
+                      <div className="text-left mt-2 pt-2 border-t border-neutral-200/80">
+                        <div className="text-[11px] text-neutral-500 font-medium mb-1">
+                          Or enter secret key manually:
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-white border border-neutral-200 text-xs font-mono">
+                          <span className="tracking-wider select-all">{manualKey}</span>
+                          <button
+                            type="button"
+                            onClick={copyManualKey}
+                            className="p-1 text-neutral-500 hover:text-black transition cursor-pointer"
+                            title="Copy Secret"
+                          >
+                            {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="totp-code-enroll" className="block text-xs font-bold text-neutral-800 mb-1.5">
+                      2. Enter the 6-digit code shown in your app to activate:
+                    </label>
+                    <input
+                      id="totp-code-enroll"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={6}
+                      autoFocus
+                      value={totpCode}
+                      onChange={(e) => {
+                        setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                        clearMessages();
+                      }}
+                      placeholder="123456"
+                      disabled={isSubmitting}
+                      className="w-full text-center tracking-[0.4em] font-mono text-2xl py-3 rounded-xl border border-neutral-200 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none font-bold"
+                    />
+                  </div>
+
                   <button
                     type="submit"
-                    disabled={isSubmitting}
-                    className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-black text-white text-sm font-bold hover:bg-neutral-800 disabled:opacity-60 transition cursor-pointer shadow-xs focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-black"
+                    disabled={isSubmitting || totpCode.trim().length !== 6}
+                    className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-black text-white text-sm font-bold hover:bg-neutral-800 disabled:opacity-50 transition cursor-pointer shadow-xs"
                   >
                     {isSubmitting ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>{language === 'ta' ? 'சரிபார்க்கிறது...' : 'Validating...'}</span>
+                        <span>Verifying TOTP Code...</span>
                       </>
                     ) : (
                       <>
-                        <span>{language === 'ta' ? 'உள்நுழையவும்' : 'Sign in'}</span>
+                        <span>Verify &amp; Enter Platform</span>
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}
                   </button>
-                </div>
 
-                {/* Secondary Action: Explore Transit Directly */}
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={onExploreAsGuest || onLoginSuccess}
-                    className="w-full py-2.5 px-4 rounded-xl border border-neutral-200/90 bg-[#FAFAFA] hover:bg-neutral-100 text-xs font-semibold text-neutral-800 transition cursor-pointer flex items-center justify-center gap-1.5"
-                  >
-                    <span>
-                      {language === 'ta'
-                        ? 'விருந்தினராக தொடரவும் (உள்நுழைவு தேவையில்லை) →'
-                        : 'Explore transit platform as guest →'}
-                    </span>
-                  </button>
-                </div>
-
-                {/* Footer Link: Create Account */}
-                <div className="pt-4 border-t border-neutral-100 text-center">
-                  <p className="text-xs text-neutral-600">
-                    {language === 'ta' ? 'கணக்கு இல்லையா?' : "Don't have an account?"}{' '}
+                  <div className="text-center pt-2">
                     <button
                       type="button"
-                      onClick={handleCreateAccount}
-                      className="font-bold text-black hover:underline cursor-pointer ml-1"
+                      onClick={() => {
+                        clearMessages();
+                        setMode('login');
+                      }}
+                      className="text-xs text-neutral-500 hover:text-black cursor-pointer"
                     >
-                      {language === 'ta' ? 'கணக்கை உருவாக்கவும்' : 'Create account'}
+                      Cancel and back to login
                     </button>
-                  </p>
-                </div>
-              </form>
+                  </div>
+                </form>
+              )}
 
-              {/* Privacy / Security Notice */}
+              {/* ─────────────────────────────────────────────────────────
+                  MODE 4: RETURNING LOGIN TOTP VERIFICATION
+                  ───────────────────────────────────────────────────────── */}
+              {mode === 'mfa_verify' && (
+                <form onSubmit={handleTotpSubmit} className="space-y-5">
+                  <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-white border border-neutral-200 flex items-center justify-center text-neutral-800 shrink-0">
+                      <KeyRound className="w-5 h-5 text-emerald-600" />
+                    </div>
+                    <div className="text-xs text-neutral-600">
+                      <div className="font-bold text-neutral-900">Authenticator Verification</div>
+                      <div>Open your Google Authenticator or Microsoft Authenticator app to view your 6-digit passcode.</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="totp-code-login" className="block text-xs font-bold text-neutral-800 mb-1.5 text-center">
+                      6-Digit Passcode
+                    </label>
+                    <input
+                      id="totp-code-login"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={6}
+                      autoFocus
+                      value={totpCode}
+                      onChange={(e) => {
+                        setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                        clearMessages();
+                      }}
+                      placeholder="000000"
+                      disabled={isSubmitting}
+                      className="w-full text-center tracking-[0.4em] font-mono text-2xl py-3 rounded-xl border border-neutral-200 bg-[#FAFAFA] focus:bg-white focus:border-black focus:ring-2 focus:ring-black/5 transition outline-none font-bold"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || totpCode.trim().length !== 6}
+                    className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-black text-white text-sm font-bold hover:bg-neutral-800 disabled:opacity-50 transition cursor-pointer shadow-xs"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Authenticating Session...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Verify &amp; Sign In</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearMessages();
+                        setMode('login');
+                      }}
+                      className="text-xs text-neutral-500 hover:text-black cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" /> Back to email/password
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Security Footer Notice */}
               <div className="mt-6 pt-4 border-t border-neutral-100 text-[11px] text-neutral-400 text-center leading-normal">
-                {language === 'ta'
-                  ? 'பாதுகாப்பான சென்னை போக்குவரத்து தகவல் போர்டல். பின்தள அங்கீகாரம் இணைக்கப்பட்ட பின் பயனர் நற்சான்றிதழ்கள் பாதுகாப்பாக கையாளப்படும்.'
-                  : 'Secure transit information directory. Real authentication integration point prepared for future backend setup.'}
+                Strict Zero-Trust Boundary &bull; Authenticator TOTP Required &bull; Bcrypt Salted Storage
               </div>
             </div>
           </div>

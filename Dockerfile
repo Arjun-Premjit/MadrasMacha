@@ -1,37 +1,57 @@
 # ─────────────────────────────────────────────────────────────
-# Madras Macha — Backend Container (Assignment 3, Step 2)
-# Production-ready Node.js 22 LTS Alpine base
+# MADRAS MACHA — HARDENED MULTI-STAGE DOCKERFILE (DA 3 QUESTION 2)
+# Production-ready, non-root, minimal attack surface Node.js 22 Alpine
 # ─────────────────────────────────────────────────────────────
-FROM node:22-alpine
+
+# ── STAGE 1: Build Application & Bundle Server ───────────────
+FROM node:22-alpine AS builder
+
+WORKDIR /build
+
+# Copy dependency manifests
+COPY package.json package-lock.json ./
+
+# Install all dependencies (including dev tools for building)
+RUN npm ci --include=dev
+
+# Copy application source tree
+COPY . .
+
+# Build Vite frontend assets (/build/dist) & bundle backend (/build/dist/server.js)
+RUN npm run build:all
+
+# ── STAGE 2: Hardened Minimal Production Runtime ─────────────
+FROM node:22-alpine AS runner
 
 # Set working directory inside container
 WORKDIR /app
 
-# Set default production environment variables
+# Set production environment defaults
 ENV NODE_ENV=production \
     PORT=3000
 
-# Install dependencies deterministically from lockfile
-# Include devDependencies required for Vite build and tsx runtime execution
+# Install production-only dependencies (excludes vite, tsc, esbuild from final image)
 COPY package.json package-lock.json ./
-RUN npm ci --include=dev
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy application source code (ignoring paths in .dockerignore)
-COPY . .
+# Copy pre-compiled production artifacts from builder stage
+COPY --from=builder /build/dist ./dist
 
-# Build Vite frontend assets into /app/dist for Express production static serving
-RUN npm run build
+# Copy legacy data directory (with non-root permissions)
+COPY --from=builder /build/data ./data
 
-# Ensure local data directory exists and assign ownership to non-root node user
-# Note: /app/data/users.json stores local user records for authentication.
-# In a multi-replica setup, this storage is per-container and not shared.
+# Ensure persistent directories exist and set strict non-root ownership
 RUN mkdir -p /app/data && chown -R node:node /app
 
-# Run as non-root user for container security
+# Switch to standard non-root user (node, UID 1000)
 USER node
 
 # Expose internal Express server port
 EXPOSE 3000
 
-# Start Express server via tsx to resolve TypeScript imports and Supabase modules
-CMD ["npx", "tsx", "server.ts"]
+# Container Health Check (polls /api/backend-status every 30s)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/backend-status || exit 1
+
+# Start bundled Node.js server directly (no dev compiler or tsx at runtime)
+CMD ["node", "dist/server.js"]

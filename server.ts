@@ -7,6 +7,33 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { getSupabaseClient, isSupabaseConfigured } from './lib/supabase/client';
+import {
+  findUserByIdentifier,
+  findUserById,
+  createUser,
+  updateUser,
+  checkAndMigrateLegacyUser,
+  getActiveServiceAlerts,
+  createServiceAlert,
+  updateServiceAlert,
+  deleteServiceAlert,
+} from './src/lib/server/authStore';
+import {
+  hashPassword,
+  verifyPassword,
+  generateTotpSecret,
+  generateQrCodeDataUrl,
+  verifyTotpCode,
+  encryptTotpSecret,
+  decryptTotpSecret,
+  signMfaChallengeToken,
+  signSessionToken,
+  verifyJwtToken,
+  checkRateLimit,
+  resetRateLimit,
+  SessionTokenPayload,
+  MfaChallengePayload,
+} from './src/lib/server/security';
 
 dotenv.config();
 
@@ -89,7 +116,7 @@ function writeUsers(users: StoredUser[]): void {
   }
 }
 
-function hashPassword(password: string, salt: string): string {
+function scryptHashLegacy(password: string, salt: string): string {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
@@ -129,214 +156,467 @@ async function startServer() {
   });
 
   // ─────────────────────────────────────────────────────────────
-  // BACKEND AUTH & USER MANAGEMENT REST API
+  // AUTHENTICATION & RBAC MIDDLEWARES
   // ─────────────────────────────────────────────────────────────
 
-  // POST /api/auth/register - Save new username & password to backend database
-  app.post('/api/auth/register', (req: Request, res: Response): any => {
+  interface AuthenticatedRequest extends Request {
+    user?: SessionTokenPayload;
+  }
+
+  const requireAuth = (req: AuthenticatedRequest, res: Response, next: NextFunction): any => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: missing or malformed Bearer token',
+      });
+    }
+
+    const token = authHeader.slice(7).trim();
+    const payload = verifyJwtToken<SessionTokenPayload>(token);
+
+    if (!payload || payload.purpose !== 'session' || !payload.mfaVerified) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: invalid or expired session token',
+      });
+    }
+
+    req.user = payload;
+    next();
+  };
+
+  const requireRole = (requiredRole: 'commuter' | 'transit_admin') => {
+    return (req: AuthenticatedRequest, res: Response, next: NextFunction): any => {
+      if (!req.user) {
+        return res.status(401).json({ success: false, error: 'Unauthorized' });
+      }
+      if (req.user.role !== requiredRole) {
+        return res.status(403).json({
+          success: false,
+          error: `Forbidden: role "${requiredRole}" required for this operation`,
+        });
+      }
+      next();
+    };
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // BACKEND AUTH & USER MANAGEMENT REST API (DA 3 QUESTION 2)
+  // ─────────────────────────────────────────────────────────────
+
+  // POST /api/auth/register - Register new account (Bcrypt work factor 12 + TOTP MFA setup)
+  app.post('/api/auth/register', async (req: Request, res: Response): Promise<any> => {
     try {
-      const { username, password, fullName } = req.body;
+      const { email, username, password, fullName } = req.body;
 
-      if (!username || typeof username !== 'string' || username.trim().length < 3) {
+      if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+        return res.status(400).json({ error: 'A valid email address is required' });
+      }
+
+      if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]{3,30}$/.test(username.trim())) {
         return res.status(400).json({
-          error: 'Username is required and must be at least 3 characters long',
+          error: 'Username must be 3-30 characters long and contain only letters, numbers, underscores, or hyphens',
         });
       }
 
-      if (!password || typeof password !== 'string' || password.length < 4) {
+      if (!password || typeof password !== 'string' || password.length < 8) {
         return res.status(400).json({
-          error: 'Password is required and must be at least 4 characters long',
+          error: 'Password is required and must be at least 8 characters long',
         });
       }
 
+      const cleanEmail = email.trim().toLowerCase();
       const cleanUsername = username.trim().toLowerCase();
-      const users = readUsers();
 
-      // Check if username already exists
-      const existing = users.find((u) => u.username.toLowerCase() === cleanUsername);
-      if (existing) {
-        return res.status(409).json({
-          error: `Username "${username.trim()}" is already registered. Please choose another username or log in.`,
-        });
+      // Check if user already exists
+      const existingEmail = await findUserByIdentifier(cleanEmail);
+      if (existingEmail) {
+        return res.status(409).json({ error: 'An account with this email already exists' });
       }
 
-      // Generate salt and secure cryptographic hash
-      const salt = crypto.randomBytes(16).toString('hex');
-      const passwordHash = hashPassword(password, salt);
-      const now = new Date().toISOString();
-      const newUser: StoredUser = {
-        id: `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-        username: username.trim(),
-        fullName: (fullName && typeof fullName === 'string' && fullName.trim()) || username.trim(),
-        salt,
-        passwordHash,
-        createdAt: now,
-        updatedAt: now,
-        lastLoginAt: now,
-      };
+      const existingUsername = await findUserByIdentifier(cleanUsername);
+      if (existingUsername) {
+        return res.status(409).json({ error: 'Username is already taken' });
+      }
 
-      users.push(newUser);
-      writeUsers(users);
+      // Hash password using bcrypt (work factor 12)
+      const passwordHash = await hashPassword(password);
 
-      // Create session token
-      const sessionToken = crypto.randomBytes(32).toString('hex');
-      const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
-      activeSessions.set(sessionToken, {
-        userId: newUser.id,
-        username: newUser.username,
-        expiresAt,
+      // Generate TOTP Authenticator secret
+      const totpSecret = generateTotpSecret(cleanUsername);
+      const encryptedSecret = encryptTotpSecret(totpSecret.base32);
+      const qrCodeDataUrl = await generateQrCodeDataUrl(totpSecret.otpauthUrl);
+
+      // Public registration ALWAYS assigns role: 'commuter' (enforcing zero privilege escalation)
+      const newUser = await createUser({
+        email: cleanEmail,
+        username: cleanUsername,
+        full_name: (fullName && typeof fullName === 'string' && fullName.trim()) || cleanUsername,
+        password_hash: passwordHash,
+        role: 'commuter',
+        mfa_enabled: false,
+        mfa_secret: encryptedSecret.ciphertext,
+        mfa_secret_iv: encryptedSecret.iv,
+        mfa_secret_tag: encryptedSecret.tag,
+        legacy_source: 'native_bcrypt',
       });
 
-      console.log(`[Backend Auth] New user registered and stored in backend: ${newUser.username} (${newUser.id})`);
+      // Issue short-lived challenge token specifically for completing TOTP enrolment
+      const mfaToken = signMfaChallengeToken({
+        userId: newUser.id,
+        email: newUser.email,
+        username: newUser.username,
+      });
+
+      console.log(`[Security Auth] Registered new commuter: ${newUser.username} (${newUser.id})`);
 
       return res.status(201).json({
         success: true,
-        message: 'Account created and credentials safely stored in backend database',
-        token: sessionToken,
+        message: 'Account created. Scan the QR code with your authenticator app to enable MFA.',
+        mfaRequired: true,
+        mfaEnrollmentRequired: true,
+        mfaToken,
+        qrCode: qrCodeDataUrl,
+        manualKey: totpSecret.base32,
         user: {
           id: newUser.id,
+          email: newUser.email,
           username: newUser.username,
-          fullName: newUser.fullName,
-          createdAt: newUser.createdAt,
-          lastLoginAt: newUser.lastLoginAt,
+          fullName: newUser.full_name,
+          role: newUser.role,
         },
       });
     } catch (err: any) {
-      console.error('[Backend Auth] Registration error:', err);
+      console.error('[Security Auth] Registration error:', err);
       return res.status(500).json({ error: 'Internal server error during registration' });
     }
   });
 
-  // POST /api/auth/login - Authenticate username and password against backend database
-  app.post('/api/auth/login', (req: Request, res: Response): any => {
+  // POST /api/auth/login - Authenticate credentials and initiate TOTP MFA challenge
+  app.post('/api/auth/login', async (req: Request, res: Response): Promise<any> => {
     try {
-      const { username, password } = req.body;
+      const { identifier, username, email, password } = req.body;
+      const targetIdentifier = (identifier || email || username || '').trim();
 
-      if (!username || !password) {
-        return res.status(400).json({ error: 'Username and password are required' });
+      if (!targetIdentifier || !password) {
+        return res.status(400).json({ error: 'Email/username and password are required' });
       }
 
-      const cleanUsername = String(username).trim().toLowerCase();
-      const users = readUsers();
+      // Brute-force & credential stuffing defense
+      const rateLimitKey = `login_${targetIdentifier.toLowerCase()}_${req.ip}`;
+      const rateLimit = checkRateLimit(rateLimitKey, 5, 15 * 60 * 1000);
+      if (!rateLimit.allowed) {
+        return res.status(429).json({
+          error: `Too many failed attempts. Please retry after ${rateLimit.retryAfterSeconds} seconds.`,
+        });
+      }
 
-      const user = users.find((u) => u.username.toLowerCase() === cleanUsername);
+      // Lookup user in persistent store
+      let user = await findUserByIdentifier(targetIdentifier);
+
+      // If not found in app_users, check if legacy scrypt record exists in data/users.json
       if (!user) {
-        return res.status(401).json({ error: 'Invalid username or password' });
+        user = await checkAndMigrateLegacyUser(targetIdentifier, String(password));
       }
 
-      const inputHash = hashPassword(password, user.salt);
-      const isMatch = safeCompare(inputHash, user.passwordHash);
+      // Timing-safe password check
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid email/username or password' });
+      }
 
+      const isMatch = await verifyPassword(String(password), user.password_hash);
       if (!isMatch) {
-        return res.status(401).json({ error: 'Invalid username or password' });
+        return res.status(401).json({ error: 'Invalid email/username or password' });
       }
 
-      // Update last login timestamp in backend database
-      user.lastLoginAt = new Date().toISOString();
-      writeUsers(users);
+      // Reset failed attempt counter on success
+      resetRateLimit(rateLimitKey);
 
-      // Issue session token
-      const sessionToken = crypto.randomBytes(32).toString('hex');
-      const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
-      activeSessions.set(sessionToken, {
-        userId: user.id,
-        username: user.username,
-        expiresAt,
+      // Check if TOTP MFA is enrolled
+      if (user.mfa_enabled && user.mfa_secret && user.mfa_secret_iv && user.mfa_secret_tag) {
+        const mfaToken = signMfaChallengeToken({
+          userId: user.id,
+          email: user.email,
+          username: user.username,
+        });
+
+        return res.json({
+          success: true,
+          message: 'Password verified. Please enter the 6-digit code from your authenticator app.',
+          mfaRequired: true,
+          mfaEnrollmentRequired: false,
+          mfaToken,
+        });
+      }
+
+      // If MFA is not yet enrolled (e.g. legacy migrated user), initiate setup flow
+      const totpSecret = generateTotpSecret(user.username);
+      const encrypted = encryptTotpSecret(totpSecret.base32);
+      await updateUser(user.id, {
+        mfa_secret: encrypted.ciphertext,
+        mfa_secret_iv: encrypted.iv,
+        mfa_secret_tag: encrypted.tag,
       });
 
-      console.log(`[Backend Auth] User authenticated: ${user.username}`);
+      const qrCodeDataUrl = await generateQrCodeDataUrl(totpSecret.otpauthUrl);
+      const mfaToken = signMfaChallengeToken({
+        userId: user.id,
+        email: user.email,
+        username: user.username,
+      });
 
       return res.json({
         success: true,
-        message: 'Authentication successful',
-        token: sessionToken,
-        user: {
-          id: user.id,
-          username: user.username,
-          fullName: user.fullName,
-          createdAt: user.createdAt,
-          lastLoginAt: user.lastLoginAt,
-        },
+        message: 'MFA setup required. Scan the QR code to connect Google/Microsoft Authenticator.',
+        mfaRequired: true,
+        mfaEnrollmentRequired: true,
+        mfaToken,
+        qrCode: qrCodeDataUrl,
+        manualKey: totpSecret.base32,
       });
     } catch (err: any) {
-      console.error('[Backend Auth] Login error:', err);
+      console.error('[Security Auth] Login error:', err);
       return res.status(500).json({ error: 'Internal server error during authentication' });
     }
   });
 
-  // GET /api/auth/me - Validate session and retrieve current user
-  app.get('/api/auth/me', (req: Request, res: Response): any => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'No authorization token provided' });
-    }
+  // POST /api/auth/mfa/verify - Verify TOTP code and issue authenticated session token
+  app.post('/api/auth/mfa/verify', async (req: Request, res: Response): Promise<any> => {
+    try {
+      const { mfaToken, code } = req.body;
 
-    const token = authHeader.slice(7).trim();
-    const session = activeSessions.get(token);
+      if (!mfaToken || typeof mfaToken !== 'string') {
+        return res.status(400).json({ error: 'MFA challenge token is required' });
+      }
 
-    if (!session || session.expiresAt < Date.now()) {
-      if (session) activeSessions.delete(token);
-      return res.status(401).json({ error: 'Session expired or invalid' });
-    }
+      if (!code || typeof code !== 'string') {
+        return res.status(400).json({ error: '6-digit authenticator code is required' });
+      }
 
-    const users = readUsers();
-    const user = users.find((u) => u.id === session.userId);
+      // Verify challenge token signature and expiry
+      const payload = verifyJwtToken<MfaChallengePayload>(mfaToken);
+      if (!payload || payload.purpose !== 'mfa_challenge') {
+        return res.status(401).json({ error: 'MFA challenge expired or invalid. Please sign in again.' });
+      }
 
-    if (!user) {
-      activeSessions.delete(token);
-      return res.status(404).json({ error: 'User not found in backend database' });
-    }
+      // Rate limit MFA verification attempts
+      const rateLimitKey = `mfa_${payload.userId}`;
+      const rateLimit = checkRateLimit(rateLimitKey, 5, 5 * 60 * 1000);
+      if (!rateLimit.allowed) {
+        return res.status(429).json({
+          error: `Too many invalid codes. Please wait ${rateLimit.retryAfterSeconds} seconds before retrying.`,
+        });
+      }
 
-    return res.json({
-      user: {
-        id: user.id,
+      // Fetch user and decrypt stored TOTP secret
+      const user = await findUserById(payload.userId);
+      if (!user || !user.mfa_secret || !user.mfa_secret_iv || !user.mfa_secret_tag) {
+        return res.status(404).json({ error: 'User MFA configuration not found' });
+      }
+
+      const decryptedSecret = decryptTotpSecret({
+        ciphertext: user.mfa_secret,
+        iv: user.mfa_secret_iv,
+        tag: user.mfa_secret_tag,
+      });
+
+      // Verify 6-digit TOTP code
+      const isValid = verifyTotpCode(code, decryptedSecret);
+      if (!isValid) {
+        return res.status(401).json({ error: 'Invalid or expired 6-digit authenticator code' });
+      }
+
+      // Reset rate limit
+      resetRateLimit(rateLimitKey);
+
+      // Confirm MFA activation and update login timestamp
+      const updatedUser = await updateUser(user.id, {
+        mfa_enabled: true,
+        last_login_at: new Date().toISOString(),
+      });
+
+      const effectiveRole = updatedUser?.role || user.role;
+
+      // Issue full authenticated session JWT
+      const sessionToken = signSessionToken({
+        userId: user.id,
+        email: user.email,
         username: user.username,
-        fullName: user.fullName,
-        createdAt: user.createdAt,
-        lastLoginAt: user.lastLoginAt,
-      },
-    });
+        role: effectiveRole,
+      });
+
+      console.log(`[Security Auth] Full MFA verification successful for user: ${user.username} (${effectiveRole})`);
+
+      return res.json({
+        success: true,
+        message: 'MFA verification successful. Session authenticated.',
+        token: sessionToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          fullName: user.full_name,
+          role: effectiveRole,
+          mfaEnabled: true,
+        },
+      });
+    } catch (err: any) {
+      console.error('[Security Auth] MFA verification error:', err);
+      return res.status(500).json({ error: 'Internal server error during MFA verification' });
+    }
   });
 
-  // POST /api/auth/logout - Invalidate session token
-  app.post('/api/auth/logout', (req: Request, res: Response): any => {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7).trim();
-      activeSessions.delete(token);
+  // GET /api/auth/me - Validate session and retrieve sanitized current user profile
+  app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    try {
+      const user = await findUserById(req.user!.userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User record not found' });
+      }
+
+      // Strictly sanitized: NEVER return password hashes or MFA secrets
+      return res.json({
+        success: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          fullName: user.full_name,
+          role: user.role,
+          mfaEnabled: user.mfa_enabled,
+          createdAt: user.created_at,
+          lastLoginAt: user.last_login_at,
+        },
+      });
+    } catch (err: any) {
+      console.error('[Security Auth] Me profile error:', err);
+      return res.status(500).json({ error: 'Internal server error retrieving user profile' });
     }
+  });
+
+  // POST /api/auth/logout - Invalidate session acknowledgment
+  app.post('/api/auth/logout', (_req: Request, res: Response): any => {
     return res.json({ success: true, message: 'Logged out successfully' });
   });
 
-  // GET /api/auth/users - Public safe listing of registered accounts in backend
-  app.get('/api/auth/users', (_req: Request, res: Response): any => {
-    const users = readUsers();
-    const safeList = users.map((u) => ({
-      id: u.id,
-      username: u.username,
-      fullName: u.fullName,
-      createdAt: u.createdAt,
-      lastLoginAt: u.lastLoginAt,
-      isStoredInBackend: true,
-    }));
+  // ─────────────────────────────────────────────────────────────
+  // ROLE-PROTECTED TRANSIT SERVICE ALERTS API (DA 3 QUESTION 2)
+  // ─────────────────────────────────────────────────────────────
 
-    return res.json({
-      count: safeList.length,
-      storageFile: 'data/users.json',
-      users: safeList,
-    });
+  // GET /api/transit/service-alerts - Public view of active transit disruptions
+  app.get('/api/transit/service-alerts', async (_req: Request, res: Response): Promise<any> => {
+    try {
+      const alerts = await getActiveServiceAlerts();
+      return res.json({
+        success: true,
+        count: alerts.length,
+        data: alerts,
+      });
+    } catch (err: any) {
+      console.error('[Service Alerts] Fetch error:', err);
+      return res.status(500).json({ success: false, error: 'Failed to retrieve service alerts' });
+    }
+  });
+
+  // POST /api/admin/service-alerts - Create alert (transit_admin only)
+  app.post('/api/admin/service-alerts', requireAuth, requireRole('transit_admin'), async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    try {
+      const { title, description, severity, route_id, affected_stations } = req.body;
+
+      if (!title || typeof title !== 'string' || title.trim().length < 3) {
+        return res.status(400).json({ error: 'Alert title is required (minimum 3 characters)' });
+      }
+
+      if (!description || typeof description !== 'string') {
+        return res.status(400).json({ error: 'Alert description is required' });
+      }
+
+      const validSeverities = ['info', 'warning', 'severe'];
+      const alertSeverity = validSeverities.includes(severity) ? severity : 'warning';
+
+      const alert = await createServiceAlert({
+        title: title.trim(),
+        description: description.trim(),
+        severity: alertSeverity as 'info' | 'warning' | 'severe',
+        route_id: route_id ? String(route_id).trim() : undefined,
+        affected_stations: Array.isArray(affected_stations) ? affected_stations : [],
+        active: true,
+        created_by: req.user!.userId,
+      });
+
+      console.log(`[Admin Alert] New alert published by ${req.user!.username}: "${alert.title}" (${alert.id})`);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Transit service alert published successfully',
+        alert,
+      });
+    } catch (err: any) {
+      console.error('[Admin Alert] Create error:', err);
+      return res.status(500).json({ error: 'Failed to create service alert' });
+    }
+  });
+
+  // PATCH /api/admin/service-alerts/:id - Modify alert (transit_admin only)
+  app.patch('/api/admin/service-alerts/:id', requireAuth, requireRole('transit_admin'), async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    try {
+      const { id } = req.params;
+      const { title, description, severity, active, affected_stations } = req.body;
+
+      const updates: any = {};
+      if (title && typeof title === 'string') updates.title = title.trim();
+      if (description && typeof description === 'string') updates.description = description.trim();
+      if (severity && ['info', 'warning', 'severe'].includes(severity)) updates.severity = severity;
+      if (typeof active === 'boolean') updates.active = active;
+      if (Array.isArray(affected_stations)) updates.affected_stations = affected_stations;
+
+      const updated = await updateServiceAlert(id, updates);
+      if (!updated) {
+        return res.status(404).json({ error: 'Service alert not found' });
+      }
+
+      console.log(`[Admin Alert] Alert updated by ${req.user!.username}: ${id}`);
+      return res.json({
+        success: true,
+        message: 'Service alert updated successfully',
+        alert: updated,
+      });
+    } catch (err: any) {
+      console.error('[Admin Alert] Update error:', err);
+      return res.status(500).json({ error: 'Failed to update service alert' });
+    }
+  });
+
+  // DELETE /api/admin/service-alerts/:id - Remove alert (transit_admin only)
+  app.delete('/api/admin/service-alerts/:id', requireAuth, requireRole('transit_admin'), async (req: AuthenticatedRequest, res: Response): Promise<any> => {
+    try {
+      const { id } = req.params;
+      const deleted = await deleteServiceAlert(id);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Service alert not found' });
+      }
+
+      console.log(`[Admin Alert] Alert deleted by ${req.user!.username}: ${id}`);
+      return res.json({
+        success: true,
+        message: 'Service alert deleted successfully',
+      });
+    } catch (err: any) {
+      console.error('[Admin Alert] Delete error:', err);
+      return res.status(500).json({ error: 'Failed to delete service alert' });
+    }
   });
 
   // GET /api/backend-status - Server & Database health status
-  app.get('/api/backend-status', (_req: Request, res: Response): any => {
-    const users = readUsers();
+  app.get('/api/backend-status', async (_req: Request, res: Response): Promise<any> => {
+    const alerts = await getActiveServiceAlerts();
     return res.json({
       status: 'online',
       serverTime: new Date().toISOString(),
-      storageType: 'backend-filesystem-json',
-      databasePath: USERS_FILE,
-      userCount: users.length,
-      activeSessionsCount: activeSessions.size,
+      securityTier: 'DA3-bcrypt-AES256GCM-TOTP-RBAC',
+      activeAlertsCount: alerts.length,
+      storageType: 'supabase-postgresql-with-resilient-fallback',
     });
   });
 

@@ -13,7 +13,7 @@ import { AboutPage } from './components/pages/AboutPage';
 import { PrivacyPolicyPage } from './components/pages/PrivacyPolicyPage';
 import { TermsPage } from './components/pages/TermsPage';
 import { TestPage } from './components/pages/TestPage';
-import { LoginPage } from './components/pages/LoginPage';
+import { LoginPage, AuthUser } from './components/pages/LoginPage';
 import { Footer } from './components/Footer';
 
 export default function App() {
@@ -25,13 +25,66 @@ export default function App() {
   } = transitData;
 
   const [currentPage, setCurrentPage] = useState<PageView>('login');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
 
-  // Scroll to top when changing pages
+  // Validate active session token on application load
+  useEffect(() => {
+    const token = localStorage.getItem('mm_session_token');
+    if (!token) {
+      setIsAuthChecking(false);
+      setCurrentPage('login');
+      return;
+    }
+
+    fetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          setCurrentUser(data.user);
+          setCurrentPage('home');
+        } else {
+          localStorage.removeItem('mm_session_token');
+          setCurrentUser(null);
+          setCurrentPage('login');
+        }
+      })
+      .catch(() => {
+        setCurrentPage('login');
+      })
+      .finally(() => {
+        setIsAuthChecking(false);
+      });
+  }, []);
+
+  // Secure navigation: Unauthenticated users are strictly held on the login page
   const handleNavigate = (page: PageView) => {
+    if (!currentUser && page !== 'login') {
+      setCurrentPage('login');
+      return;
+    }
     setCurrentPage(page);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleLogout = async () => {
+    const token = localStorage.getItem('mm_session_token');
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {}
+    }
+    localStorage.removeItem('mm_session_token');
+    setCurrentUser(null);
+    setCurrentPage('login');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -56,10 +109,25 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center font-sans">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-black text-white text-xs font-black flex items-center justify-center animate-pulse">
+            MM
+          </div>
+          <span className="text-xs font-semibold text-neutral-600">
+            Validating security session...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-black selection:bg-black selection:text-white antialiased flex flex-col justify-between font-sans">
       {/* Floating Glassmorphism Header with Integrated Search (active on transit pages) */}
-      {currentPage !== 'login' && (
+      {currentPage !== 'login' && currentUser && (
         <Header
           currentPage={currentPage}
           onNavigate={handleNavigate}
@@ -67,6 +135,8 @@ export default function App() {
           setIsMenuOpen={setIsMenuOpen}
           onSelectRouteId={handleSelectRouteById}
           onSelectRoute={(route) => handleSelectRouteById(route.route_id)}
+          currentUser={currentUser}
+          onLogout={handleLogout}
         />
       )}
 
@@ -74,8 +144,10 @@ export default function App() {
       <main className="flex-1">
         {currentPage === 'login' && (
           <LoginPage
-            onLoginSuccess={() => handleNavigate('home')}
-            onExploreAsGuest={() => handleNavigate('home')}
+            onLoginSuccess={(token, user) => {
+              setCurrentUser(user);
+              handleNavigate('home');
+            }}
           />
         )}
 

@@ -1,4 +1,4 @@
-import app from '../server.ts';
+import app from '../server.bundle.js';
 
-// Vercel invokes this Express application for every /api/* request.
+// The build step bundles the Express app and local TypeScript modules.
 export default app;

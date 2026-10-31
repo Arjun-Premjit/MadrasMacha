@@ -39,7 +39,7 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.VERCEL ? path.join('/tmp', 'madras-macha-data') : path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 
 // Interface for stored user record in backend database
@@ -89,7 +89,7 @@ function initDatabase() {
   }
 }
 
-initDatabase();
+if (!process.env.VERCEL) initDatabase();
 
 // Atomic read/write helpers
 function readUsers(): StoredUser[] {
@@ -131,10 +131,11 @@ function safeCompare(a: string, b: string): boolean {
   }
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-  const isProduction = process.env.NODE_ENV === 'production';
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const isProduction = process.env.NODE_ENV === 'production';
+
+function configureRoutes() {
 
   app.use(express.json());
 
@@ -147,7 +148,7 @@ async function startServer() {
     } else {
       res.setHeader('Access-Control-Allow-Origin', '*');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') {
       return res.sendStatus(204);
@@ -690,9 +691,16 @@ async function startServer() {
     }
   });
 
-  // ─────────────────────────────────────────────────────────────
-  // VITE DEV MIDDLEWARE / STATIC ASSETS
-  // ─────────────────────────────────────────────────────────────
+}
+
+configureRoutes();
+
+// Vercel imports this Express app as a serverless function.
+// Static frontend assets are served by Vercel's Vite output/CDN, not Express.
+export default app;
+
+// Preserve the existing local development and Docker server workflow.
+async function startLocalServer() {
   if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -711,7 +719,9 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('[MadrasMacha] Fatal error starting server:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  startLocalServer().catch((err) => {
+    console.error('[MadrasMacha] Fatal error starting server:', err);
+    process.exit(1);
+  });
+}
